@@ -77,8 +77,10 @@ static void connect_database() {
     create_schema();
 }
 
-extern void home_route(connection_t*);
-extern void pdf_search(connection_t*);
+extern void home_route(connection_t* conn);
+extern void pdf_search(connection_t* conn);
+extern void list_files(connection_t* conn);
+extern void get_file_by_id(connection_t* conn);
 
 // Connect to database before invoking handler.
 static void pre_exec(void*) {
@@ -101,6 +103,8 @@ int main(int argc, char* argv[]) {
     // Register all routes
     route_register("/", HTTP_GET, home_route);
     route_register("/api/search", HTTP_GET, pdf_search);
+    route_register("/api/list-files", HTTP_GET, list_files);
+    route_register("/api/list-files/{file_id}", HTTP_GET, get_file_by_id);
 
     return pulsar_run(config.bind_addr, config.port);
 }

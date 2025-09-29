@@ -11,6 +11,7 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-warn-execst
 set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,--no-warn-execstack")
 
 find_package(PkgConfig REQUIRED)
+
 # This should pull in most dependencies automatically
 pkg_check_modules(POPPLER_GLIB REQUIRED poppler-glib)
 

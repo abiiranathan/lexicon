@@ -23,6 +23,7 @@ typedef struct {
     int64_t file_id;        /** Database file ID. */
     pgconn_t* conn;         /** Database connection for this thread. */
     _Atomic int* ref_count; /** Reference counter for document cleanup. */
+
 } PageParams;
 
 /** SQL queries used throughout the application. */
