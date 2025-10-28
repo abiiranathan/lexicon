@@ -6,9 +6,6 @@
 #include <solidc/threadpool.h>
 #include <stdatomic.h>
 
-extern pgpool_t* pool; /** Global connection pool. */
-extern int TIMEOUT_MS; /** Database default timeout in milliseconds. */
-
 /** User data passed to the directory walking callback. */
 typedef struct {
     pgconn_t* conn;     /** Database connection for the main thread. */
@@ -23,73 +20,13 @@ typedef struct {
     int64_t file_id;        /** Database file ID. */
     pgconn_t* conn;         /** Database connection for this thread. */
     _Atomic int* ref_count; /** Reference counter for document cleanup. */
-
 } PageParams;
 
 /** SQL queries used throughout the application. */
 static const char* file_insert_query =
-    "INSERT INTO files(name, path) VALUES($1, $2) ON CONFLICT(path) DO NOTHING";
-static const char* stmt_insert = "insert_file";
-
-static const char* page_insert_query =
-    "INSERT INTO pages(file_id, page_num, text) VALUES($1, $2, $3)";
-static const char* stmt_page_insert = "insert_page";
-
-static const char* file_id_query = "SELECT id FROM files WHERE path = $1";
-static const char* file_id_stmt  = "select_file_id";
-
-/**
- * Ensures that prepared statements exist on the given connection.
- * This function is idempotent - it's safe to call multiple times on the same connection.
- *
- * @param conn Database connection to prepare statements on.
- * @return true on success, false on failure.
- */
-static bool ensure_prepared_statements(pgconn_t* conn) {
-    // Check if statements are already prepared on this connection
-    PGresult* check_res = PQexec(pgpool_get_raw_connection(conn),
-                                 "SELECT name FROM pg_prepared_statements WHERE name IN "
-                                 "('insert_file', 'insert_page', 'select_file_id')");
-
-    int existing_count = 0;
-    if (check_res && PQresultStatus(check_res) == PGRES_TUPLES_OK) {
-        existing_count = PQntuples(check_res);
-    }
-
-    if (check_res) {
-        PQclear(check_res);
-    }
-
-    // If all 3 statements exist, we're done
-    if (existing_count == 3) {
-        return true;
-    }
-
-    // Prepare missing statements
-    if (!pgpool_prepare(conn, stmt_insert, file_insert_query, 2, NULL, TIMEOUT_MS)) {
-        fprintf(stderr, "Failed to prepare file insert statement\n");
-        return false;
-    }
-
-    if (!pgpool_prepare(conn, stmt_page_insert, page_insert_query, 3, NULL, TIMEOUT_MS)) {
-        fprintf(stderr, "Failed to prepare page insert statement\n");
-        return false;
-    }
-
-    if (!pgpool_prepare(conn, file_id_stmt, file_id_query, 1, NULL, TIMEOUT_MS)) {
-        fprintf(stderr, "Failed to prepare file ID select statement\n");
-        return false;
-    }
-
-    return true;
-}
-
-/** Cleanup prepared statements. */
-static void cleanup_prepared_statements(pgconn_t* conn) {
-    pgpool_deallocate(conn, stmt_insert, TIMEOUT_MS);
-    pgpool_deallocate(conn, stmt_page_insert, TIMEOUT_MS);
-    pgpool_deallocate(conn, file_id_stmt, TIMEOUT_MS);
-}
+    "INSERT INTO files(name, path, num_pages) VALUES($1, $2, $3) ON CONFLICT(path) DO NOTHING";
+static const char* page_insert_query = "INSERT INTO pages(file_id, page_num, text) VALUES($1, $2, $3)";
+static const char* file_id_query     = "SELECT id FROM files WHERE path = $1";
 
 /**
  * Threadpool task function that extracts text from a single PDF page and stores it in the database.
@@ -102,12 +39,6 @@ void extract_pdf_pages(void* arg) {
 
     // Ensure cleanup of resources in all exit paths
     defer({
-        // Deallocate prepare statements
-        cleanup_prepared_statements(pp->conn);
-        printf("Released connection: %p\n", (void*)pp->conn);
-
-        pgpool_release(pool, pp->conn);
-
         // Atomically decrement and check if we're the last task
         if (atomic_fetch_sub(pp->ref_count, 1) == 1) {
             // We were the last task - clean up shared resources
@@ -116,12 +47,6 @@ void extract_pdf_pages(void* arg) {
         }
         free(pp);
     });
-
-    // Ensure prepared statements exist on this connection
-    if (!ensure_prepared_statements(pp->conn)) {
-        fprintf(stderr, "Failed to prepare statements on worker connection\n");
-        return;
-    }
 
     // Get the page
     PopplerPage* page = poppler_document_get_page(pp->doc, pp->page);
@@ -134,6 +59,7 @@ void extract_pdf_pages(void* arg) {
     char* text = poppler_page_get_text(page);
     if (!text) {
         text = g_strdup("");  // Empty string if no text
+        ASSERT(text);
     }
     defer({ g_free(text); });
 
@@ -145,15 +71,11 @@ void extract_pdf_pages(void* arg) {
 
     // Insert page into database using prepared statement
     const char* values[] = {file_id_str, page_num_str, text};
-    PGresult* res =
-        pgpool_execute_prepared(pp->conn, stmt_page_insert, 3, values, NULL, NULL, 0, TIMEOUT_MS);
-    defer({
-        if (res) PQclear(res);
-    });
+    PGresult* res;
 
-    if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
-        const char* msg = pgpool_error_message(pp->conn);
-        fprintf(stderr, "Failed to insert page %d: %s\n", pp->page + 1, msg);
+    res = pgconn_query_params_safe(pp->conn, page_insert_query, 3, values, NULL);
+    if (!res) {
+        fprintf(stderr, "Failed to insert page %d: %s\n", pp->page + 1, pgconn_error_message_safe(pp->conn));
         return;
     }
 }
@@ -188,49 +110,9 @@ WalkDirOption walk_dir_callback(const char* path, const char* name, void* userda
     }
 
     WalkDirUserData* data = userdata;
-    pgconn_t* conn        = data->conn;
     bool* success         = data->success;
 
-    // Ensure prepared statements exist on this connection
-    if (!ensure_prepared_statements(conn)) {
-        fprintf(stderr, "Failed to prepare statements on main connection\n");
-        *success = false;
-        return DirStop;
-    }
-    defer({ cleanup_prepared_statements(conn); });
-
-    // Insert file into database
-    const char* values[] = {name, path};
-    PGresult* res =
-        pgpool_execute_prepared(conn, stmt_insert, 2, values, NULL, NULL, 0, TIMEOUT_MS);
-    if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
-        *success = false;
-        fprintf(stderr, "Failed to insert file %s: %s\n", path, pgpool_error_message(conn));
-        if (res) {
-            PQclear(res);
-        }
-        return DirStop;
-    }
-    defer({ PQclear(res); });
-
-    printf(">>> Inserted PDF: %s\n", path);
-    *success = true;
-
-    // Get the file ID for the inserted/existing file
-    const char* file_path_param[] = {path};
-    PGresult* id_res =
-        pgpool_execute_prepared(conn, file_id_stmt, 1, file_path_param, NULL, NULL, 0, TIMEOUT_MS);
-    if (!id_res || PQntuples(id_res) == 0) {
-        *success = false;
-        fprintf(stderr, "Failed to retrieve file ID for %s\n", path);
-        if (id_res) {
-            PQclear(id_res);
-        }
-        return DirStop;
-    }
-    defer({ PQclear(id_res); });
-
-    int64_t file_id = atoll(PQgetvalue(id_res, 0, 0));
+    // =============== Open PDF to count number of pages =================
 
     // Convert file path to URI for poppler
     char* uri = g_filename_to_uri(path, NULL, NULL);
@@ -245,10 +127,10 @@ WalkDirOption walk_dir_callback(const char* path, const char* name, void* userda
     GError* error        = NULL;
     PopplerDocument* doc = poppler_document_new_from_file(uri, NULL, &error);
     if (!doc) {
-        *data->success = false;
-        printf("Error opening PDF: %s\n", error->message);
+        *data->success = true;
+        fprintf(stderr, "Error opening PDF: %s. Skipping\n", error->message);
         g_error_free(error);
-        return DirStop;
+        return DirContinue;
     }
 
     int npages = poppler_document_get_n_pages(doc);
@@ -257,6 +139,38 @@ WalkDirOption walk_dir_callback(const char* path, const char* name, void* userda
         g_object_unref(doc);
         return DirContinue;
     }
+
+    // Convert int to char*
+    char num_pages[8];
+    snprintf(num_pages, sizeof(num_pages), "%d", npages);
+
+    // Insert file into database
+    const char* values[] = {name, path, num_pages};
+    PGresult* res        = pgconn_query_params_safe(data->conn, file_insert_query, 3, values, NULL);
+    if (!res) {
+        *success = false;
+        fprintf(stderr, "Failed to insert file %s: %s\n", path, pgconn_error_message_safe(data->conn));
+        return DirStop;
+    }
+    defer({ PQclear(res); });
+
+    printf(">>> Inserted file: %s\n", path);
+    *success = true;
+
+    // Get the file ID for the inserted/existing file
+    const char* file_path_param[] = {path};
+    PGresult* id_res              = pgconn_query_params_safe(data->conn, file_id_query, 1, file_path_param, NULL);
+    if (!id_res || PQntuples(id_res) == 0) {
+        *success = false;
+        fprintf(stderr, "Failed to retrieve file ID for %s\n", path);
+        if (id_res) {
+            PQclear(id_res);
+        }
+        return DirStop;
+    }
+    defer({ PQclear(id_res); });
+
+    int64_t file_id = atoll(PQgetvalue(id_res, 0, 0));
 
     // Allocate reference counter for this document
     _Atomic int* ref_count = malloc(sizeof(_Atomic int));
@@ -270,9 +184,8 @@ WalkDirOption walk_dir_callback(const char* path, const char* name, void* userda
     atomic_store(ref_count, npages);
 
     // Submit each page as a separate task to the threadpool
+    printf("[%s]: Extracting text from %d pages\n", name, npages);
     for (int page = 0; page < npages; page++) {
-        printf("[%s]: Page %d of %d\n", name, page + 1, npages);
-
         PageParams* pp = malloc(sizeof(PageParams));
         if (!pp) {
             perror("malloc");
@@ -286,28 +199,12 @@ WalkDirOption walk_dir_callback(const char* path, const char* name, void* userda
             return DirStop;
         }
 
-        // Acquire a database connection for this worker thread
-        pgconn_t* thread_conn = pgpool_acquire(pool, 10000);  // Wait 10s for a connection
-        if (!thread_conn) {
-            printf("Timeout waiting for a connection\n");
-            free(pp);
-
-            *data->success = false;
-            // Clean up if we can't get a connection
-            if (atomic_fetch_sub(ref_count, npages - page) == npages - page) {
-                g_object_unref(doc);
-                free(ref_count);
-            }
-            return DirStop;
-        }
-
         // Initialize task parameters - ownership transfers to threadpool task
         pp->page      = page;
         pp->doc       = doc;
         pp->file_id   = file_id;
-        pp->conn      = thread_conn;
+        pp->conn      = data->conn;
         pp->ref_count = ref_count;
-
         threadpool_submit(data->thpool, extract_pdf_pages, pp);
     }
 
@@ -321,56 +218,38 @@ WalkDirOption walk_dir_callback(const char* path, const char* name, void* userda
  * @param root_dir Root directory to start scanning for PDF files.
  * @return true if all operations completed successfully, false otherwise.
  */
-bool process_pdfs(const char* root_dir) {
+bool process_pdfs(const char* root_dir, pgconn_t* conn) {
     bool success = false;
-
-    // Acquire connection with automatic cleanup
-    pgconn_t* conn = pgpool_acquire(pool, 1000);
-    ASSERT_NOT_NULL(conn && "Failed to acquire connection from pool");
-    defer({ pgpool_release(pool, conn); });
-
     // Create threadpool with automatic cleanup
     Threadpool* threadpool = threadpool_create(4);
     if (!threadpool) {
         puts("Failed to create threadpool");
         return false;
     }
-    defer({ threadpool_destroy(threadpool, -1); });
 
     // Begin transaction with automatic commit/rollback
-    ASSERT_TRUE(pgpool_begin(conn) && "Failed to BEGIN transaction");
+    ASSERT(pgconn_begin(conn));
+
     defer({
         if (success) {
-            if (!pgpool_commit(conn)) {
-                fprintf(stderr, "Failed to commit transaction\n");
-            }
+            pgconn_commit(conn);
         } else {
-            if (!pgpool_rollback(conn)) {
-                fprintf(stderr, "Failed to rollback transaction\n");
-            }
+            pgconn_rollback(conn);
         }
     });
 
+    // Wait for threads to complete before commit/rollback.
+    defer({ threadpool_destroy(threadpool, -1); });
+
     // Start walking the root directory
-    WalkDirUserData data = {.conn = conn, .thpool = threadpool, .success = &success};
+    WalkDirUserData data = {
+        .conn    = conn,
+        .thpool  = threadpool,
+        .success = &success,
+    };
+
     if (dir_walk(root_dir, walk_dir_callback, &data) != 0) {
         return false;
     }
-
     return success;
-}
-
-/**
- * Main entry point for the PDF indexing command.
- * Extracts the root directory from command arguments and starts the PDF processing.
- *
- * @param cmd Command structure containing parsed command-line arguments.
- */
-void build_pdf_index(Command* cmd) {
-    char* root_dir = FlagValue_STRING(cmd, "root", NULL);
-    ASSERT_NOT_NULL(root_dir);
-
-    process_pdfs(root_dir);
-    pgpool_destroy(pool);  // clean up all connections since we are quiting
-    exit(EXIT_SUCCESS);
 }

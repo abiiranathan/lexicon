@@ -15,16 +15,18 @@ find_package(PkgConfig REQUIRED)
 # This should pull in most dependencies automatically
 pkg_check_modules(POPPLER_GLIB REQUIRED poppler-glib)
 
-add_executable(${PROJECT_NAME} pdfsearch.c routes.c cli.c)
+add_executable(${PROJECT_NAME} pdfsearch.c routes.c cli.c logger.c pdf.c)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE 
-    pgpool 
+    pgconn 
     solidc 
     pulsar 
-    cjson 
+    yyjson
     pq 
     m
+    z
     ${POPPLER_GLIB_LIBRARIES}
+    gio-2.0
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
