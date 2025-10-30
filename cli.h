@@ -10,7 +10,11 @@ extern "C" {
 #endif
 
 // Walk the root_dir and insert all PDF pages into the database.
-bool process_pdfs(const char* root_dir, pgconn_t* conn);
+// If a page is empty or has fewer pages than min_pages, it is skipped.
+// This can be used to filter out small PDF that are not books.
+bool process_pdfs(pgconn_config_t* config, const char* root_dir, int min_pages, bool dryrun);
+
+extern char* pdf_text_clean(char* text, size_t len, bool remove_urls);
 
 #ifdef __cplusplus
 }

@@ -157,14 +157,24 @@ void pdf_search(PulsarCtx* ctx) {
     }
 
     static const char* search_query =
-        "SELECT p.file_id, f.name, f.num_pages, p.page_num, "
-        "ts_headline('english', p.text, websearch_to_tsquery('english', $1), "
-        "'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
-        "ts_rank(p.text_vector, websearch_to_tsquery('english', $1)) as rank "
-        "FROM pages p "
-        "JOIN files f ON p.file_id = f.id "
-        "WHERE p.text_vector @@ websearch_to_tsquery('english', $1) "
-        "ORDER BY rank DESC, f.name, p.page_num "
+        "WITH RankedChunks AS ("
+        "  SELECT "
+        "    p.file_id, f.name, f.num_pages, p.page_num, "
+        "    ts_headline('english', p.text, websearch_to_tsquery('english', $1), "
+        "    'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
+        "    ts_rank(p.text_vector, websearch_to_tsquery('english', $1)) as rank, "
+        "    ROW_NUMBER() OVER ( "
+        "      PARTITION BY p.file_id, p.page_num "
+        "      ORDER BY ts_rank(p.text_vector, websearch_to_tsquery('english', $1)) DESC "
+        "    ) as rn "
+        "  FROM pages p "
+        "  JOIN files f ON p.file_id = f.id "
+        "  WHERE p.text_vector @@ websearch_to_tsquery('english', $1) "
+        ") "
+        "SELECT file_id, name, num_pages, page_num, snippet, rank "
+        "FROM RankedChunks "
+        "WHERE rn = 1 "                        // Keep only the highest-ranked chunk/row for each page
+        "ORDER BY rank DESC, name, page_num "  // Order the unique pages by their best rank
         "LIMIT 100";
 
     pgconn_t* db = DB(conn);

@@ -13,6 +13,8 @@ typedef struct {
     char* pgconn;     // postgres connection string.
     char* root_dir;   // Root Dir of PDFs to index.
     int port;         // Server port.
+    int min_pages;    // Minimum number of pages in a PDF to be indexable. Default is 4
+    bool dryrun;      // Perform dry-run
 } server_config_t;
 
 extern void pdf_search(PulsarCtx* ctx);
@@ -25,10 +27,13 @@ extern void render_pdf_page_as_png(PulsarCtx* ctx);
 // Each connections is used for a single thread run by pulsar server.
 pgconn_t* connections[NUM_WORKERS] = {};
 
-#define NUM_SCHEMA 4
-static server_config_t config = {.port = 8080};
+#define NUM_SCHEMA 6
+static server_config_t config = {.port = 8080, .min_pages = 4};
 
 static const char* schemas[NUM_SCHEMA] = {
+    // Turn off notices
+    "SET client_min_messages = WARNING",
+
     // Files schema
     "CREATE TABLE IF NOT EXISTS files ("
     "    id BIGSERIAL NOT NULL PRIMARY KEY, "
@@ -52,6 +57,7 @@ static const char* schemas[NUM_SCHEMA] = {
 
     // Index for page lookups.
     "CREATE INDEX IF NOT EXISTS idx_pages_file_id ON pages(file_id)",
+    "CREATE INDEX IF NOT EXISTS idx_pages_page_num ON pages(page_num)",
 };
 
 static void initConnections(void) {
@@ -107,9 +113,19 @@ static void pre_exec_func(void*) {
 }
 
 static void build_index(Command* cmd) {
-    char* root_dir  = FlagValue_STRING(cmd, "root", NULL);
-    pgconn_t* first = connections[0];
-    process_pdfs(root_dir, first);
+    char* root_dir = FlagValue_STRING(cmd, "root", NULL);
+    ASSERT_NOT_NULL(root_dir);
+
+    size_t min_pages    = FlagValue_SIZE_T(cmd, "min_pages", 4);
+    bool dryrun         = FlagValue_INT(cmd, "dryrun", false);
+    pgconn_config_t cfg = {
+        .conninfo               = config.pgconn,
+        .auto_reconnect         = true,
+        .max_reconnect_attempts = 5,
+        .thread_safe            = true,
+    };
+
+    process_pdfs(&cfg, root_dir, min_pages, dryrun);
     exit(EXIT_SUCCESS);
 }
 
@@ -131,6 +147,8 @@ int main(int argc, char* argv[]) {
 
     Command* idxcmd = AddCommand("index", "Build PDF index into the database", build_index);
     AddFlagCmd_STRING(idxcmd, "root", 'r', "Root directory of pdfs", &config.root_dir, true);
+    AddFlagCmd_INT(idxcmd, "min_pages", 'p', "Minimum number of pages in PDF to be indexed", &config.min_pages, false);
+    AddFlagCmd_BOOL(idxcmd, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun, false);
 
     FlagParse(argc, argv, pre_exec_func, NULL);
 
