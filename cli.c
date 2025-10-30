@@ -137,8 +137,6 @@ static void process_pdf_task(void* arg) {
         return;
     }
 
-    printf(">>> Worker processing %s (%d pages in single)\n", params->name, params->npages);
-
     // Begin single transaction for entire PDF
     PGresult* begin_res = pgconn_query_safe(conn, "BEGIN", NULL);
     ASSERT(begin_res != nullptr);
@@ -167,9 +165,9 @@ static void process_pdf_task(void* arg) {
 
     if (!pages_ok) {
         atomic_store(params->success, false);
-        fprintf(stderr, ">>> Transaction for %s will be rolled back due to errors\n", params->name);
+        fprintf(stderr, ">>> Transaction for %s will be rolled back due to errors\n", params->path);
     } else {
-        printf(">>> Successfully processed %s (%d pages)\n", params->name, params->npages);
+        printf(">>> Successfully processed %s (%d pages)\n", params->path, params->npages);
     }
 }
 
@@ -245,7 +243,7 @@ static WalkDirOption walk_dir_callback(const char* path, const char* name, void*
         return DirContinue;
     }
 
-    printf(">>> Found %s (%d pages)\n", path, npages);
+    // printf(">>> Found %s (%d pages)\n", path, npages);
 
     if (data->dryrun) {
         return DirContinue;
