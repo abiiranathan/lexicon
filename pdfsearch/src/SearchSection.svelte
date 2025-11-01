@@ -1,17 +1,19 @@
 <script lang="ts">
-  import type { FormEventHandler } from "svelte/elements";
   import type { LocalStore } from "./lib/localstorage.svelte";
 
   type Props = {
     searchQuery: LocalStore<string>;
     currentTab: LocalStore<string>;
-    oninput: FormEventHandler<HTMLInputElement>;
     onsubmit: () => void;
     onTabSwitch: (tab: string) => void;
   };
 
-  let { searchQuery, currentTab, oninput, onsubmit, onTabSwitch }: Props =
-    $props();
+  let { searchQuery, currentTab, onsubmit, onTabSwitch }: Props = $props();
+  let query = $state(searchQuery.value);
+
+  $effect(() => {
+    searchQuery.set(query);
+  });
 </script>
 
 <section class="search-section">
@@ -20,8 +22,7 @@
       type="text"
       class="search-input"
       placeholder="Search through your documents..."
-      value={searchQuery.value}
-      {oninput}
+      bind:value={query}
       onkeypress={(e) => e.key === "Enter" && onsubmit()}
       autocomplete="off"
     />

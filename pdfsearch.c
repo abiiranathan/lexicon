@@ -27,19 +27,20 @@ extern void render_pdf_page_as_png(PulsarCtx* ctx);
 // Each connections is used for a single thread run by pulsar server.
 pgconn_t* connections[NUM_WORKERS] = {};
 
-#define NUM_SCHEMA 6
+#define NUM_SCHEMA 7
 static server_config_t config = {.port = 8080, .min_pages = 4};
 
 static const char* schemas[NUM_SCHEMA] = {
     // Turn off notices
-    "SET client_min_messages = WARNING",
+    "SET client_min_messages = ERROR",
 
     // Files schema
     "CREATE TABLE IF NOT EXISTS files ("
     "    id BIGSERIAL NOT NULL PRIMARY KEY, "
     "    name TEXT NOT NULL, "
     "    num_pages INT NOT NULL, "
-    "    path TEXT NOT NULL UNIQUE"
+    "    path TEXT NOT NULL,"
+    "    UNIQUE(name, path)"
     ")",
 
     // Pages schema
@@ -58,6 +59,9 @@ static const char* schemas[NUM_SCHEMA] = {
     // Index for page lookups.
     "CREATE INDEX IF NOT EXISTS idx_pages_file_id ON pages(file_id)",
     "CREATE INDEX IF NOT EXISTS idx_pages_page_num ON pages(page_num)",
+
+    // -- Composite index for filtering
+    "CREATE INDEX IF NOT EXISTS idx_pages_lookup ON pages(file_id, page_num)",
 };
 
 static void initConnections(void) {

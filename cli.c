@@ -10,7 +10,7 @@
 
 /** SQL queries used throughout the application. */
 static const char* file_insert_query =
-    "INSERT INTO files(name, path, num_pages) VALUES($1, $2, $3) ON CONFLICT(path) DO UPDATE SET num_pages = "
+    "INSERT INTO files(name, path, num_pages) VALUES($1, $2, $3) ON CONFLICT(name, path) DO UPDATE SET num_pages = "
     "EXCLUDED.num_pages RETURNING id";
 static const char* page_insert_query =
     "INSERT INTO pages(file_id, page_num, text) VALUES($1, $2, $3) ON CONFLICT (file_id, page_num) DO NOTHING";

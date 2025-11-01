@@ -18,22 +18,37 @@
 
   let currentTab = useLocalStorage("currentTab", "search");
   let searchQuery = useLocalStorage("search-query", "");
+  let fileNameFilter = useLocalStorage("file-name-filter", "");
 
   let searchResults = $state<SearchResult[]>([]);
-  let files = $state<FileType[]>([]);
+
+  let files = $state<FileListResult>({
+    results: [],
+    page: 1,
+    total_count: 0,
+    limit: 25,
+    has_next: false,
+    has_prev: false,
+    total_pages: 0,
+  });
+
+  let currentPage = $state(1);
+  let pageLimit = $state(25);
   let isSearching = $state(false);
   let isLoadingFiles = $state(false);
   let searchError = $state<string | null>(null);
   let filesError = $state<string | null>(null);
   let modalContent = $state<ModalContentType | null>(null);
   let searchCache = $state(new Map());
+  const maxCacheSize = 100;
   let searchTimeout: any;
+  let fileFilterTimeout: any;
 
   // URL state
   let params = new SvelteURLSearchParams(location.search);
 
   onMount(() => {
-    loadFiles();
+    loadFiles(currentPage, pageLimit);
     handleSearch(searchQuery.value);
 
     let fileIdString = params.get("file");
@@ -78,7 +93,11 @@
 
     try {
       const data = await searchAPI(query);
-      searchCache.set(query, data);
+
+      // Bounded cache avoid excessive memory consumption.
+      if (searchCache.size < maxCacheSize) {
+        searchCache.set(query, data);
+      }
       searchResults = data;
     } catch (error: unknown) {
       searchError = (error as Error).message;
@@ -87,12 +106,27 @@
     }
   }
 
-  async function loadFiles() {
+  async function loadFiles(
+    page: number = 1,
+    limit: number = 25,
+    nameFilter: string = ""
+  ) {
     isLoadingFiles = true;
     filesError = null;
 
+    const params: FileSearchParams = {
+      page,
+      limit,
+    };
+
+    if (nameFilter && nameFilter.trim().length > 0) {
+      params.name = nameFilter.trim();
+    }
+
     try {
-      files = await loadAllFiles();
+      files = await loadAllFiles(params);
+      currentPage = page;
+      pageLimit = limit;
     } catch (error: unknown) {
       filesError = (error as Error).message;
     } finally {
@@ -100,22 +134,34 @@
     }
   }
 
-  function handleSearchInput(
-    event: Event & { currentTarget: EventTarget & HTMLInputElement }
-  ) {
-    const query = event.currentTarget.value.trim();
-    searchQuery.set(query);
-    clearTimeout(searchTimeout);
-    searchTimeout = setTimeout(() => {
-      handleSearch(query);
-    }, 300);
-  }
-
   function handleSearchSubmit() {
     clearTimeout(searchTimeout);
     if (searchQuery.value) {
       handleSearch(searchQuery.value);
     }
+  }
+
+  function handleFileNameFilterInput(
+    event: Event & { currentTarget: EventTarget & HTMLInputElement }
+  ) {
+    const filter = event.currentTarget.value;
+    fileNameFilter.set(filter);
+    clearTimeout(fileFilterTimeout);
+    fileFilterTimeout = setTimeout(() => {
+      currentPage = 1;
+      loadFiles(1, pageLimit, filter);
+    }, 300);
+  }
+
+  function handlePageChange(page: number) {
+    if (page < 1) return;
+    loadFiles(page, pageLimit, fileNameFilter.value);
+  }
+
+  function handleLimitChange(limit: number) {
+    pageLimit = limit;
+    currentPage = 1;
+    loadFiles(1, limit, fileNameFilter.value);
   }
 
   async function viewPage(
@@ -149,14 +195,22 @@
 
   function switchTab(tab: string) {
     currentTab.set(tab);
-    if (tab === "files" && !files) {
-      loadFiles();
+    if (tab === "files" && files.results.length === 0) {
+      loadFiles(currentPage, pageLimit);
     }
   }
 
   function handleModalClose() {
     modalContent = null;
   }
+
+  $effect(() => {
+    // Clean up timeouts on component destroy
+    return () => {
+      clearTimeout(searchTimeout);
+      clearTimeout(fileFilterTimeout);
+    };
+  });
 </script>
 
 <div class="container">
@@ -175,7 +229,6 @@
   <SearchSection
     {searchQuery}
     {currentTab}
-    oninput={handleSearchInput}
     onsubmit={handleSearchSubmit}
     onTabSwitch={switchTab}
   />
@@ -197,12 +250,64 @@
         }}
       />
     {:else}
+      <div class="files-controls">
+        <input
+          type="text"
+          class="file-name-filter"
+          placeholder="Filter by file name..."
+          value={fileNameFilter.value}
+          oninput={handleFileNameFilterInput}
+        />
+        <div class="limit-selector">
+          <label for="limit-select">Items per page:</label>
+          <select
+            id="limit-select"
+            value={pageLimit}
+            onchange={(e) => handleLimitChange(Number(e.currentTarget.value))}
+          >
+            <option value={10}>10</option>
+            <option value={25}>25</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
+        </div>
+      </div>
+
       <FilesList
         {files}
         isLoading={isLoadingFiles}
         error={filesError}
         {viewPage}
       />
+
+      {#if files.total_count > 0}
+        <div class="pagination">
+          <button
+            class="pagination-btn"
+            disabled={!files.has_prev || isLoadingFiles}
+            onclick={() => handlePageChange(currentPage - 1)}
+          >
+            Previous
+          </button>
+
+          <div class="pagination-info">
+            <span class="page-numbers">
+              Page {files.page} of {Math.ceil(files.total_count / files.limit)}
+            </span>
+            <span class="total-count">
+              ({files.total_count} total files)
+            </span>
+          </div>
+
+          <button
+            class="pagination-btn"
+            disabled={!files.has_next || isLoadingFiles}
+            onclick={() => handlePageChange(currentPage + 1)}
+          >
+            Next
+          </button>
+        </div>
+      {/if}
     {/if}
   </section>
 </div>
@@ -253,6 +358,119 @@
     margin-top: 2rem;
   }
 
+  .files-controls {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .file-name-filter {
+    flex: 1;
+    min-width: 200px;
+    padding: 0.625rem 1rem;
+    background: var(--surface, #1e293b);
+    border: 1px solid var(--border, #334155);
+    border-radius: 0.5rem;
+    color: var(--text-primary, #f1f5f9);
+    font-size: 0.9375rem;
+    transition: all 0.2s ease;
+  }
+
+  .file-name-filter:focus {
+    outline: none;
+    border-color: var(--primary, #60a5fa);
+    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.1);
+  }
+
+  .file-name-filter::placeholder {
+    color: var(--text-tertiary, #64748b);
+  }
+
+  .limit-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .limit-selector label {
+    font-size: 0.875rem;
+    color: var(--text-secondary, #94a3b8);
+    white-space: nowrap;
+  }
+
+  .limit-selector select {
+    padding: 0.5rem 0.75rem;
+    background: var(--surface, #1e293b);
+    border: 1px solid var(--border, #334155);
+    border-radius: 0.375rem;
+    color: var(--text-primary, #f1f5f9);
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .limit-selector select:focus {
+    outline: none;
+    border-color: var(--primary, #60a5fa);
+  }
+
+  .pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 2rem;
+    padding: 1.25rem;
+    background: var(--surface, #1e293b);
+    border: 1px solid var(--border, #334155);
+    border-radius: 0.75rem;
+  }
+
+  .pagination-btn {
+    padding: 0.625rem 1.25rem;
+    background: var(--primary, #60a5fa);
+    color: white;
+    border: none;
+    border-radius: 0.5rem;
+    font-size: 0.9375rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    min-width: 100px;
+  }
+
+  .pagination-btn:hover:not(:disabled) {
+    background: var(--primary-hover, #3b82f6);
+    transform: translateY(-1px);
+  }
+
+  .pagination-btn:disabled {
+    background: var(--surface-elevated, #334155);
+    color: var(--text-tertiary, #64748b);
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .pagination-info {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .page-numbers {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--text-primary, #f1f5f9);
+  }
+
+  .total-count {
+    font-size: 0.8125rem;
+    color: var(--text-secondary, #94a3b8);
+  }
+
   @media (max-width: 640px) {
     .container {
       padding: 1rem;
@@ -272,6 +490,29 @@
 
     .header {
       margin-bottom: 2rem;
+    }
+
+    .files-controls {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .file-name-filter {
+      width: 100%;
+      min-width: unset;
+    }
+
+    .limit-selector {
+      justify-content: space-between;
+    }
+
+    .pagination {
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .pagination-btn {
+      width: 100%;
     }
   }
 

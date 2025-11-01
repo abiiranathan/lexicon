@@ -2,7 +2,7 @@
   import PDFLogo from "./PDFLogo.svelte";
 
   type FilesListProps = {
-    files: FileType[];
+    files: FileListResult;
     isLoading: boolean;
     error: string | null;
     viewPage: (
@@ -15,8 +15,6 @@
 
   let { files, isLoading, error, viewPage }: FilesListProps = $props();
 
-  let filesToDisplay = $derived(files || []);
-
   function handleFileClick(file: FileType) {
     viewPage(file.id, 1, file.num_pages, file.name);
   }
@@ -27,9 +25,9 @@
     <div class="loading-state">Loading files...</div>
   {:else if error}
     <div class="error-state">Failed to load files: {error}</div>
-  {:else if files && files.length > 0}
+  {:else if files && files.results.length > 0}
     <div class="files-grid">
-      {#each filesToDisplay as file}
+      {#each files.results as file}
         <!-- svelte-ignore a11y_interactive_supports_focus -->
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div

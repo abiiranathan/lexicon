@@ -5,6 +5,22 @@ type FileType = {
     num_pages: number;
 }
 
+type FileListResult = {
+    page: number;
+    limit: number;
+    total_count: number;
+    has_next: boolean;
+    has_prev: boolean;
+    total_pages: number;
+    results: FileType[];
+}
+
+type FileSearchParams = {
+    page: number;
+    limit?: number;
+    name?: string;
+}
+
 type SearchResult = {
     file_id: number;
     file_name: string;

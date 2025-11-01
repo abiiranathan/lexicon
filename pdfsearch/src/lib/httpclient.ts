@@ -1,7 +1,20 @@
 const baseURL = import.meta.env.VITE_SERVER_URL as string;
 
-export async function loadAllFiles(): Promise<FileType[]> {
-    const url = `${baseURL}/api/list-files`
+
+export async function loadAllFiles(params: FileSearchParams): Promise<FileListResult> {
+    const searchParams = new URLSearchParams();
+
+    if (params.limit) {
+        searchParams.append("limit", params.limit.toString());
+    }
+    if (params.name) {
+        searchParams.append("name", params.name);
+    }
+    if (params.page) {
+        searchParams.append("page", params.page.toString());
+    }
+    const query = searchParams.toString();
+    const url = `${baseURL}/api/list-files?${query}`
     const res = await fetch(url)
     const data = await res.json()
     return data

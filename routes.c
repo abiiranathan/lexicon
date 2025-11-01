@@ -157,24 +157,32 @@ void pdf_search(PulsarCtx* ctx) {
     }
 
     static const char* search_query =
-        "WITH RankedChunks AS ("
+        "WITH query AS ("
+        "  SELECT websearch_to_tsquery('english', $1) as tsq"
+        "), "
+        "RankedChunks AS ("
         "  SELECT "
-        "    p.file_id, f.name, f.num_pages, p.page_num, "
-        "    ts_headline('english', p.text, websearch_to_tsquery('english', $1), "
-        "    'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
-        "    ts_rank(p.text_vector, websearch_to_tsquery('english', $1)) as rank, "
-        "    ROW_NUMBER() OVER ( "
-        "      PARTITION BY p.file_id, p.page_num "
-        "      ORDER BY ts_rank(p.text_vector, websearch_to_tsquery('english', $1)) DESC "
-        "    ) as rn "
+        "    p.file_id, f.name, f.num_pages, p.page_num, p.text, "
+        "    ts_rank(p.text_vector, query.tsq) as rank "
         "  FROM pages p "
+        "  CROSS JOIN query "
         "  JOIN files f ON p.file_id = f.id "
-        "  WHERE p.text_vector @@ websearch_to_tsquery('english', $1) "
+        "  WHERE p.text_vector @@ query.tsq "
+        "    AND ts_rank(p.text_vector, query.tsq) >= 0.005 "
+        "), "
+        "UniquePages AS ("
+        "  SELECT DISTINCT ON (file_id, page_num) "
+        "    file_id, name, num_pages, page_num, text, rank "
+        "  FROM RankedChunks "
+        "  ORDER BY file_id, page_num, rank DESC"
         ") "
-        "SELECT file_id, name, num_pages, page_num, snippet, rank "
-        "FROM RankedChunks "
-        "WHERE rn = 1 "                        // Keep only the highest-ranked chunk/row for each page
-        "ORDER BY rank DESC, name, page_num "  // Order the unique pages by their best rank
+        "SELECT "
+        "  file_id, name, num_pages, page_num, "
+        "  ts_headline('english', text, (SELECT tsq FROM query), "
+        "    'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
+        "  rank "
+        "FROM UniquePages "
+        "ORDER BY rank DESC, name, page_num "
         "LIMIT 100";
 
     pgconn_t* db = DB(conn);
@@ -252,12 +260,85 @@ void pdf_search(PulsarCtx* ctx) {
     conn_send_json(conn, StatusOK, json_str);
 }
 
-/** Lists all PDF files in the database. */
+/** Lists all PDF files in the database paginated on query params "page" & limit
+Returns JSON object with keys: "page", "limit", "results", "has_next", "has_prev","total_count", "total_pages"
+*/
 void list_files(PulsarCtx* ctx) {
-    PulsarConn* conn  = ctx->conn;
-    const char* query = "SELECT id, name, path, num_pages FROM files ORDER BY name";
-    pgconn_t* db      = DB(conn);
-    PGresult* res     = pgconn_query(db, query, NULL);
+    PulsarConn* conn          = ctx->conn;
+    const char* page_str      = query_get(conn, "page");
+    const char* page_size_str = query_get(conn, "limit");
+    const char* name          = query_get(conn, "name");
+
+    int page = 1, page_size = 10;
+    if (page_str) {
+        str_to_int(page_str, &page);
+    }
+
+    if (page_size_str) {
+        str_to_int(page_size_str, &page_size);
+    }
+
+    // Ensure page is at least 1
+    if (page < 1) {
+        page = 1;
+    }
+    // Ensure page_size is reasonable
+    if (page_size < 1) {
+        page_size = 25;
+    }
+    if (page_size > 100) {
+        page_size = 100;
+    }
+
+    pgconn_t* db = DB(conn);
+
+    // First, get the total count of files
+    const char* count_query = "SELECT COUNT(*) FROM files";
+    PGresult* count_res     = pgconn_query(db, count_query, NULL);
+    if (!count_res) {
+        send_json_error(conn, pgconn_error_message(db));
+        return;
+    }
+    defer({ PQclear(count_res); });
+
+    int64_t total_count = 0;
+    if (PQntuples(count_res) > 0) {
+        const char* count_str = PQgetvalue(count_res, 0, 0);
+        if (count_str) {
+            total_count = strtoll(count_str, NULL, 10);
+        }
+    }
+
+    // Calculate offset for pagination
+    int offset = (page - 1) * page_size;
+
+    // After validating page_size, add name validation
+    const char* query;
+    int param_count;
+    const char* params[3];  // Increased from 2 to accommodate name parameter
+
+    // Prepare limit and offset parameters
+    char limit_str[32], offset_str[32];
+    snprintf(limit_str, sizeof(limit_str), "%d", page_size);
+    snprintf(offset_str, sizeof(offset_str), "%d", offset);
+
+    if (name && name[0] != '\0') {
+        // Filter by name using case-insensitive ILIKE
+        char nameFilter[128];
+        snprintf(nameFilter, sizeof(nameFilter), "%%%s%%", name);
+        query     = "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3";
+        params[0] = nameFilter;
+        params[1] = limit_str;
+        params[2] = offset_str;
+        param_count = 3;
+    } else {
+        // No name filter
+        query       = "SELECT id, name, path, num_pages FROM files ORDER BY name LIMIT $1 OFFSET $2";
+        params[0]   = limit_str;
+        params[1]   = offset_str;
+        param_count = 2;
+    }
+    PGresult* res = pgconn_query_params(db, query, param_count, params, NULL);
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
         return;
@@ -271,8 +352,21 @@ void list_files(PulsarCtx* ctx) {
     }
     defer({ yyjson_mut_doc_free(doc); });
 
+    // Create root object instead of array
+    yyjson_mut_val* root = yyjson_mut_obj(doc);
+    if (!root) {
+        send_json_error(conn, "Failed to create JSON root object");
+        return;
+    }
+    yyjson_mut_doc_set_root(doc, root);
+
+    // Create results array
     yyjson_mut_val* results_array = yyjson_mut_arr(doc);
-    yyjson_mut_doc_set_root(doc, results_array);
+    if (!results_array) {
+        send_json_error(conn, "Failed to create JSON results array");
+        return;
+    }
+    yyjson_mut_obj_add_val(doc, root, "results", results_array);
 
     int ntuples = PQntuples(res);
     for (int i = 0; i < ntuples; i++) {
@@ -285,7 +379,7 @@ void list_files(PulsarCtx* ctx) {
             continue;
         }
 
-        // Convert file ID to integer
+        // Convert file ID and num_pages to integers
         int64_t file_id   = strtoll(file_id_str, NULL, 10);
         int64_t num_pages = strtoll(num_pages_str, NULL, 10);
 
@@ -301,6 +395,20 @@ void list_files(PulsarCtx* ctx) {
 
         yyjson_mut_arr_append(results_array, result_obj);
     }
+
+    // Add pagination metadata
+    yyjson_mut_obj_add_int(doc, root, "page", page);
+    yyjson_mut_obj_add_int(doc, root, "limit", page_size);
+    yyjson_mut_obj_add_int(doc, root, "total_count", (int)total_count);
+
+    // Calculate has_next and has_prev
+    int64_t total_pages = (total_count + page_size - 1) / page_size;
+    if (total_pages == 0) {
+        total_pages = 1;  // At least one page even if empty
+    }
+    yyjson_mut_obj_add_bool(doc, root, "has_next", page < total_pages);
+    yyjson_mut_obj_add_bool(doc, root, "has_prev", page > 1);
+    yyjson_mut_obj_add_int(doc, root, "total_pages", (int)total_pages);
 
     char* json_str = yyjson_mut_write(doc, 0, NULL);
     if (!json_str) {
