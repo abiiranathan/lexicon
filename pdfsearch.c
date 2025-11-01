@@ -23,7 +23,7 @@ extern void get_file_by_id(PulsarCtx* ctx);
 extern void get_page_by_file_and_page(PulsarCtx* ctx);
 extern void render_pdf_page_as_png(PulsarCtx* ctx);
 extern bool init_response_cache(size_t capacity, uint32_t ttl_seconds);
-extern void response_cache_destroy();
+extern void destroy_response_cache();
 
 // Static pool of postgres connections.
 // Each connections is used for a single thread run by pulsar server.
@@ -179,8 +179,9 @@ int main(int argc, char* argv[]) {
     init_response_cache(1024, 300);  // 1024 entries, 300 sec TTL
 
     int code = pulsar_run(config.bind_addr, config.port);
+    printf("Server exited with status code: %d\n", code);
 
     closeConnections();
-    response_cache_destroy();
+    destroy_response_cache();
     return code;
 }

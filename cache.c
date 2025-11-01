@@ -139,7 +139,6 @@ void response_cache_destroy(response_cache_t* cache) {
     cache_entry_t* current = cache->head;
     while (current) {
         cache_entry_t* next = current->next;
-        printf("Freeing entry: %p\n", current);
         cache_entry_free(current);
         current = next;
     }

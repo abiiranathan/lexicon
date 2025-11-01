@@ -218,7 +218,7 @@
     <div class="logo-section">
       <Logo />
       <div class="logo-text">
-        <h1>DocuVault</h1>
+        <h1>DocVault</h1>
         <p class="tagline">
           Lightning-fast semantic search across your entire document library
         </p>

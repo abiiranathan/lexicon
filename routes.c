@@ -154,6 +154,20 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
         return;
     }
 
+    // Try cache first
+    char cache_key[CACHE_KEY_MAX_LEN];
+    snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d", (long long)file_id, page_num);
+
+    char* png_data  = nullptr;
+    size_t png_size = 0;
+    if (response_cache_get(g_response_cache, cache_key, &png_data, &png_size)) {
+        static const char headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
+        conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
+        conn_write(conn, png_data, png_size);
+        free(png_data);
+        return;
+    }
+
     static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
     const char* params[]     = {file_id_str};
 
@@ -184,7 +198,9 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
         static const char headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
         conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
         conn_write(conn, png_buffer.data, png_buffer.size);
-        free(png_buffer.data);
+
+        // Cache the page for 60 seconds
+        response_cache_set(g_response_cache, cache_key, png_buffer.data, png_buffer.size, 60);
     } else {
         conn_set_status(conn, StatusInternalServerError);
         send_json_error(conn, "Error writing PNG image");
