@@ -218,7 +218,7 @@
     <div class="logo-section">
       <Logo />
       <div class="logo-text">
-        <h1>DocVault</h1>
+        <h1>Lexicon</h1>
         <p class="tagline">
           Lightning-fast semantic search across your entire document library
         </p>
@@ -263,7 +263,8 @@
           <select
             id="limit-select"
             value={pageLimit}
-            onchange={(e) => handleLimitChange(Number(e.currentTarget.value))}
+            onchange={(e: { currentTarget: { value: number } }) =>
+              handleLimitChange(Number(e.currentTarget.value))}
           >
             <option value={10}>10</option>
             <option value={25}>25</option>

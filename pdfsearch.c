@@ -169,7 +169,7 @@ int main(int argc, char* argv[]) {
     route_register("/api/file/{file_id}/render-page/{page_num}", HTTP_GET, render_pdf_page_as_png);
 
     // Since we are using / for static assets, put at the end to avoid collisions
-    route_static("/", "./pdfsearch/dist");
+    route_static("/", "./ui/dist");
 
     pulsar_set_callback(logger);
 
