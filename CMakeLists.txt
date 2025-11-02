@@ -6,6 +6,7 @@ set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Necessary to avoid warning since we use defer that relies on __attribute__(cleanup)
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-warn-execstack")
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-warn-execstack")
 set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,--no-warn-execstack")
@@ -15,16 +16,27 @@ find_package(PkgConfig REQUIRED)
 # This should pull in most dependencies automatically
 pkg_check_modules(POPPLER_GLIB REQUIRED poppler-glib)
 
-add_executable(${PROJECT_NAME} pdfsearch.c routes.c cli.c cache.c logger.c pdf.c pdf_preprocess.c)
+# The executable needs ./ui/dist svelte frontend served at / route.
+# Build with: `cd ui` && `npm run build`
+add_executable(${PROJECT_NAME} 
+    lexicon.c 
+    routes.c 
+    cli.c 
+    cache.c 
+    logger.c 
+    pdf.c 
+    pdf_preprocess.c
+)
 
+# All dependencies from abiiranathan can be built from source with cmake
 target_link_libraries(${PROJECT_NAME} PRIVATE 
-    pgconn 
-    solidc 
-    pulsar 
-    yyjson
-    pq 
-    m
-    z
+    pgconn # github.com/abiiranathan/pgconn
+    solidc # github.com/abiiranathan/solidc
+    pulsar # github.com/abiiranathan/pulsar
+    yyjson # https://github.com/ibireme/yyjson
+    pq     # libpq
+    m      # math library
+    z      # zlib
     ${POPPLER_GLIB_LIBRARIES}
     gio-2.0
 )
