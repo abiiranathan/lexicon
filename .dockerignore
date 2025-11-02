@@ -1,0 +1,53 @@
+# Build artifacts
+build/
+.cmake/
+dist/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Node/UI artifacts
+ui/node_modules/
+ui/.svelte-kit/
+ui/package-lock.json
+
+# Git
+.git/
+.gitignore
+.gitattributes
+.cache
+
+# Documentation
+*.md
+README*
+LICENSE
+CHANGELOG*
+docs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Test data
+test/
+tests/
+*.test
+*_test.c
+
+# Temporary files
+*.tmp
+*.log
+*.bak

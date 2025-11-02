@@ -12,6 +12,7 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-warn-execst
 set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,--no-warn-execstack")
 
 find_package(PkgConfig REQUIRED)
+find_package(PostgreSQL REQUIRED)
 
 # This should pull in most dependencies automatically
 pkg_check_modules(POPPLER_GLIB REQUIRED poppler-glib)
@@ -34,15 +35,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     solidc # github.com/abiiranathan/solidc
     pulsar # github.com/abiiranathan/pulsar
     yyjson # https://github.com/ibireme/yyjson
-    pq     # libpq
     m      # math library
     z      # zlib
     ${POPPLER_GLIB_LIBRARIES}
+    ${PostgreSQL_LIBRARIES}
     gio-2.0
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${POPPLER_GLIB_INCLUDE_DIRS}
+    ${PostgreSQL_INCLUDE_DIRS}
 )
 
 target_compile_options(${PROJECT_NAME} PRIVATE

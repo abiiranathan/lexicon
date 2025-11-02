@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lexicon-db
+    environment:
+      POSTGRES_DB: lexicon
+      POSTGRES_USER: lexicon
+      POSTGRES_PASSWORD: lexicon_secret
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lexicon"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lexicon-net
+
+  lexicon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lexicon-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # PostgreSQL connection string
+      PGCONN: "postgresql://lexicon:lexicon_secret@postgres:5432/lexicon?sslmode=disable"
+    command: >
+      --port 8080
+      --addr 0.0.0.0
+      --pgconn postgresql://lexicon:lexicon_secret@postgres:5432/lexicon?sslmode=disable
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount your PDF directory here - adjust the left side to your host path
+      - /home/nabiizy/Documents:/pdfs:ro
+    networks:
+      - lexicon-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  lexicon-net:
+    driver: bridge
