@@ -4,12 +4,16 @@
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
     "target": "ES2022",
     "useDefineForClassFields": true,
+    "lib": [
+      "ESNext",
+      "WebWorker"
+    ],
     "module": "ESNext",
     "types": [
       "svelte",
       "vite/client"
     ],
-    "noEmit": false,
+    "noEmit": true,
     "allowJs": true,
     "checkJs": true,
     "composite": true,
@@ -18,6 +22,8 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.js",
-    "src/**/*.svelte"
+    "src/**/*.svelte",
+    "public/sw.js",
+    "public/sw.js"
   ]
 }

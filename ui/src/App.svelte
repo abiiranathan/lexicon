@@ -14,7 +14,6 @@
   } from "./lib/httpclient";
   import { useLocalStorage } from "./lib/localstorage.svelte";
   import { SvelteURLSearchParams } from "svelte/reactivity";
-  import Logo from "./Logo.svelte";
 
   let currentTab = useLocalStorage("currentTab", "search");
   let searchQuery = useLocalStorage("search-query", "");
@@ -218,7 +217,7 @@
 <div class="container">
   <header class="header">
     <div class="logo-section">
-      <Logo />
+      <img src="/favicon-96x96.png" alt="Logo" width="96" height="96" />
       <div class="logo-text">
         <h1>Lexicon</h1>
         <p class="tagline">

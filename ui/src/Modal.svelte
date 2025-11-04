@@ -134,7 +134,10 @@
       // Scroll mode: render at full width, natural height
       const containerWidth = container.clientWidth;
       const imgAspect = img.width / img.height;
-      const displayWidth = containerWidth;
+
+      // Set minimum width to ensure readability.
+      const minDisplayWidth = 600; // Adjust this value based on your content
+      const displayWidth = Math.max(containerWidth, minDisplayWidth);
       const displayHeight = displayWidth / imgAspect;
 
       // Set canvas size with device pixel ratio for crisp rendering
@@ -1006,7 +1009,8 @@
 
   .canvas-container.scroll-mode {
     height: auto;
-    overflow: visible;
+    overflow-x: auto;
+    overflow-y: visible;
     touch-action: auto;
   }
 

@@ -1,45 +1,67 @@
-// @ts-ignore-file
+// @ts-check
+/// <reference lib="webworker" />
 
-import { build, files, version } from '$service-worker';
+/** @type {ServiceWorkerGlobalScope & typeof globalThis} */
+const sw = /** @type {any} */ (self);
 
+const version = 'v1';
 const STATIC_CACHE = `static-cache-${version}`;
 const DYNAMIC_CACHE = `dynamic-cache-${version}`;
-
-// Assets to precache: build files and non-PDF static files
-const to_cache = build.concat(files.filter((f) => !f.endsWith('.pdf')));
-const staticAssets = new Set(to_cache);
-
-// Routes excluded from any caching
 const excludeFromCache = ['/search'];
 
 // Extensions that should be cached when fetched
 const cacheableExtensions = new Set([
     '.js', '.css', '.png', '.jpg', '.jpeg',
-    '.gif', '.svg', '.ico', '.map'
+    '.gif', '.svg', '.ico',
 ]);
 
-/** Checks if URL should not be cached. */
+const tocache = [
+    "/",
+    "/favicon.ico",
+    "/favicon.svg",
+    "/web-app-manifest-512x512.png",
+    "/web-app-manifest-192x192.png",
+    "/apple-touch-icon.png",
+    "/favicon-96x96.png",
+    "/site.webmanifest"
+];
+
+/**
+ * Checks if URL should not be cached.
+ * @param {URL} url - The URL to check.
+ * @returns {boolean} True if the URL should be excluded from caching.
+ */
 function shouldExcludeFromCache(url) {
     return excludeFromCache.some((route) => url.pathname.includes(route));
 }
 
-/** Checks if URL is a cacheable static asset. */
+/**
+ * Checks if URL is a cacheable static asset.
+ * @param {URL} url - The URL to check.
+ * @returns {boolean} True if the URL is a cacheable static asset.
+ */
 function isCacheableAsset(url) {
     const pathname = url.pathname.toLowerCase();
     const ext = pathname.substring(pathname.lastIndexOf('.'));
-    return cacheableExtensions.has(ext) || staticAssets.has(url.pathname);
+    return cacheableExtensions.has(ext);
 }
 
-self.addEventListener('install', (event) => {
+/**
+ * @param {ExtendableEvent} event
+ */
+sw.addEventListener('install', (event) => {
     event.waitUntil(
         caches
             .open(STATIC_CACHE)
-            .then((cache) => cache.addAll(['/', ...to_cache]))
-            .then(() => self.skipWaiting())
+            .then((cache) => cache.addAll(tocache))
+            .then(() => sw.skipWaiting())
     );
 });
 
-self.addEventListener('activate', (event) => {
+/**
+ * @param {ExtendableEvent} event
+ */
+sw.addEventListener('activate', (event) => {
     event.waitUntil(
         caches.keys().then(async (keys) => {
             for (const key of keys) {
@@ -47,12 +69,15 @@ self.addEventListener('activate', (event) => {
                     await caches.delete(key);
                 }
             }
-            await self.clients.claim();
+            await sw.clients.claim();
         })
     );
 });
 
-self.addEventListener('fetch', (event) => {
+/**
+ * @param {FetchEvent} event
+ */
+sw.addEventListener('fetch', (event) => {
     const { request } = event;
     const url = new URL(request.url);
 
@@ -64,7 +89,12 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(handleFetch(request, url));
 });
 
-/** Handles fetch requests with appropriate caching strategy. */
+/**
+ * Handles fetch requests with appropriate caching strategy.
+ * @param {Request} request - The fetch request.
+ * @param {URL} url - The parsed URL from the request.
+ * @returns {Promise<Response>} The response from cache or network.
+ */
 async function handleFetch(request, url) {
     // Skip caching for excluded routes
     if (shouldExcludeFromCache(url)) {
@@ -84,7 +114,7 @@ async function handleFetch(request, url) {
 
         try {
             const networkResponse = await fetch(request);
-            if (networkResponse.status === 200 && !staticAssets.has(url.pathname)) {
+            if (networkResponse.status === 200) {
                 const dynamicCache = await caches.open(DYNAMIC_CACHE);
                 dynamicCache.put(request, networkResponse.clone());
             }
