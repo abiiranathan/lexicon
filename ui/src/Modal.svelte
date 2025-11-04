@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { searchAPI } from "./lib/httpclient";
+  import SearchResults from "./SearchResults.svelte";
+
   type ModalProps = {
     isOpen: boolean;
     onClose: () => void;
@@ -24,6 +27,7 @@
 
   // View mode: 'fit' for zoom/pan, 'scroll' for readable scrolling
   let viewMode = $state<"fit" | "scroll">("scroll");
+  let searchQuery = $state("");
 
   // Pan and zoom state (only used in 'fit' mode)
   let scale = $state(1);
@@ -33,6 +37,12 @@
   let lastTouchDistance = $state(0);
   let dragStartX = $state(0);
   let dragStartY = $state(0);
+
+  let searchResults = $state<{ results: SearchResult[] }>({
+    results: [],
+  });
+  let isSearching = $state(false);
+  let searchError = $state<string | null>(null);
 
   // Sync URL state with modal
   $effect(() => {
@@ -417,6 +427,45 @@
       }, 0);
     }
   };
+
+  async function handleSearch(query: string) {
+    if (!query || !modalContent || query.length < 2) {
+      searchResults = { results: [] };
+      searchError = null;
+      return;
+    }
+
+    isSearching = true;
+    searchError = null;
+
+    try {
+      const data = await searchAPI(query, { fileId: modalContent.file_id });
+      searchResults = data;
+    } catch (error: unknown) {
+      searchError = (error as Error).message;
+    } finally {
+      isSearching = false;
+    }
+  }
+
+  const handleResultClick = (result: SearchResult) => {
+    viewPage(
+      result.file_id,
+      result.page_num,
+      result.num_pages,
+      result.file_name
+    );
+    searchResults = { results: [] };
+    searchQuery = "";
+  };
+
+  function highlightText(text: string) {
+    return text
+      .replace(/<b>/g, "<mark>")
+      .replace(/<\/b>/g, "</mark>")
+      .replace(/\n/g, "<br/>")
+      .replace(/<\/mark>\s*<mark>/g, " ");
+  }
 </script>
 
 {#if isOpen && modalContent}
@@ -431,7 +480,7 @@
   >
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="modal-content" onclick={(e) => e.stopPropagation()}>
+    <div class="modal-content" onclick={(e: Event) => e.stopPropagation()}>
       <div class="modal-header">
         <h3 id="modal-title">{modalContent.title}</h3>
 
@@ -462,7 +511,7 @@
               {#if showPageInput}
                 <form
                   class="page-jump-form"
-                  onsubmit={(e) => {
+                  onsubmit={(e: Event) => {
                     e.preventDefault();
                     handlePageJump();
                   }}
@@ -638,11 +687,65 @@
             {/if}
           {/if}
         </div>
+
+        <div class="search-wrapper">
+          <input
+            type="text"
+            class="search_book"
+            id="search_book"
+            placeholder="Search this book"
+            bind:value={searchQuery}
+            onkeydown={(e: KeyboardEvent) => {
+              if (e.key == "Enter") {
+                handleSearch(searchQuery);
+              }
+            }}
+          />
+          <!-- Search results dropdown -->
+          {#if searchQuery.length > 0 && (isSearching || searchError || searchResults.results.length > 0)}
+            <div class="search-results-dropdown">
+              {#if isSearching}
+                <div class="result-message">
+                  Searching for "{searchQuery}"...
+                </div>
+              {:else if searchError}
+                <div class="result-message error-message-dropdown">
+                  Search Error: {searchError}
+                </div>
+              {:else if searchResults.results.length === 0}
+                <div class="result-message">
+                  No results found for "{searchQuery}"
+                </div>
+              {:else}
+                <ul class="results-list">
+                  {#each searchResults.results as result (result.file_id + "-" + result.page_num)}
+                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                    <li
+                      class="search-result-item"
+                      onclick={() => handleResultClick(result)}
+                    >
+                      <div class="result-header-row">
+                        <span class="result-title">{result.file_name}</span>
+                        <span class="result-page">Page {result.page_num}</span>
+                      </div>
+                      <p class="result-snippet">
+                        {@html highlightText(result.snippet)}
+                      </p>
+                    </li>
+                  {/each}
+                </ul>
+                <div class="result-footer">
+                  {searchResults.results.length} results found.
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
         <button
           class="modal-close"
           onclick={onClose}
           aria-label="Close"
-          title="Close (Esc)">×</button
+          title="Close (Esc)">&times;</button
         >
       </div>
 
@@ -699,7 +802,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 0.75rem;
-    max-width: 1400px;
+    max-width: 1600px;
     width: 100%;
     height: 100%;
     display: flex;
@@ -716,6 +819,12 @@
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
     gap: 1rem;
+    position: relative;
+  }
+
+  .modal-header h3 {
+    flex: 0 1 auto;
+    max-width: 30%;
   }
 
   .modal-header h3 {
@@ -735,6 +844,13 @@
     align-items: center;
     gap: 0.75rem;
     flex-shrink: 0;
+  }
+
+  .search-wrapper {
+    position: relative;
+    flex: 1; /* Allow wrapper to take available space */
+    min-width: 200px; /* Ensure minimum space */
+    max-width: 500px; /* Control max width of search area */
   }
 
   .page-navigation,
@@ -920,6 +1036,95 @@
     font-size: 0.875rem;
   }
 
+  .search_book {
+    width: 100%;
+    outline: none;
+    padding: 0.5rem 1rem;
+    border-radius: 30px;
+    border: 2px solid var(--border, #222); /* Using CSS var for consistency */
+    background: var(--surface, #1e293b);
+    color: var(--text-primary, #f8fafc);
+  }
+
+  .search-results-dropdown {
+    position: absolute;
+    top: 100%; /* Position right below the input */
+    left: 0;
+    right: 0;
+    z-index: 10000; /* Higher than modal-content but below close button if necessary */
+    background: var(--surface-light, #334155);
+    border: 1px solid var(--border, #475569);
+    border-radius: 0 0 0.5rem 0.5rem;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+    max-height: 400px;
+    overflow-y: auto;
+    margin-top: 2px; /* Small gap from the input */
+  }
+
+  .results-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .search-result-item {
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    transition: background-color 0.15s;
+    border-bottom: 1px solid var(--border-light, #334155);
+  }
+
+  .search-result-item:hover {
+    background: var(--hover-bg, #475569);
+  }
+
+  .result-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+  }
+
+  .result-title {
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .result-page {
+    font-size: 0.75rem;
+    color: var(--accent, #60a5fa);
+    font-weight: 500;
+    flex-shrink: 0;
+    margin-left: 0.5rem;
+  }
+
+  .result-snippet {
+    font-size: 1rem;
+    color: var(--text-secondary);
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .result-message,
+  .result-footer {
+    padding: 0.75rem 1rem;
+    text-align: center;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+  }
+
+  .error-message-dropdown {
+    color: var(--error);
+  }
+
   @media (max-width: 768px) {
     .modal {
       padding: 0;
@@ -962,6 +1167,17 @@
     .zoom-controls {
       padding: 0.25rem 0.5rem;
       gap: 0.5rem;
+    }
+
+    .search-wrapper {
+      order: 4; /* Place search below controls on small screens */
+      flex: 1 1 100%;
+      max-width: 100%;
+      margin-top: 0.5rem;
+    }
+
+    .search-results-dropdown {
+      max-height: 300px;
     }
 
     .nav-button svg {

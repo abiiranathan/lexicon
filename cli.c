@@ -243,9 +243,8 @@ static WalkDirOption walk_dir_callback(const char* path, const char* name, void*
         return DirContinue;
     }
 
-    // printf(">>> Found %s (%d pages)\n", path, npages);
-
     if (data->dryrun) {
+        printf(">>> Found %s (%d pages)\n", path, npages);
         return DirContinue;
     }
 

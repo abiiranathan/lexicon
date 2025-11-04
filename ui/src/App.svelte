@@ -20,7 +20,9 @@
   let searchQuery = useLocalStorage("search-query", "");
   let fileNameFilter = useLocalStorage("file-name-filter", "");
 
-  let searchResults = $state<SearchResult[]>([]);
+  let searchResults = $state<{ results: SearchResult[] }>({
+    results: [],
+  });
 
   let files = $state<FileListResult>({
     results: [],
@@ -78,7 +80,7 @@
 
   async function handleSearch(query: string) {
     if (!query || query.length < 2) {
-      searchResults = [];
+      searchResults = { results: [] };
       searchError = null;
       return;
     }

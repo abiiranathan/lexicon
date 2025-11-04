@@ -214,10 +214,10 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
  */
 void pdf_search(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-
     ASSERT(g_response_cache);
 
-    const char* query = query_get(conn, "q");
+    const char* fileId = query_get(conn, "file_id");  // possibly undefined (NULL)
+    const char* query  = query_get(conn, "q");
     if (!query || query[0] == '\0') {
         send_json_error(conn, "Missing search query");
         return;
@@ -236,41 +236,82 @@ void pdf_search(PulsarCtx* ctx) {
         return;
     }
 
-    static const char* search_query =
-        "WITH query AS ("
-        "  SELECT websearch_to_tsquery('english', $1) as tsq"
-        "), "
-        "RankedChunks AS ("
-        "  SELECT "
-        "    p.file_id, f.name, f.num_pages, p.page_num, p.text, "
-        "    ts_rank(p.text_vector, query.tsq) as rank "
-        "  FROM pages p "
-        "  CROSS JOIN query "
-        "  JOIN files f ON p.file_id = f.id "
-        "  WHERE p.text_vector @@ query.tsq "
-        "    AND ts_rank(p.text_vector, query.tsq) >= 0.005 "
-        "), "
-        "UniquePages AS ("
-        "  SELECT DISTINCT ON (file_id, page_num) "
-        "    file_id, name, num_pages, page_num, text, rank "
-        "  FROM RankedChunks "
-        "  ORDER BY file_id, page_num, rank DESC"
-        ") "
-        "SELECT "
-        "  file_id, name, num_pages, page_num, "
-        "  ts_headline('english', text, (SELECT tsq FROM query), "
-        "    'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
-        "  rank "
-        "FROM UniquePages "
-        "ORDER BY rank DESC, name, page_num "
-        "LIMIT 100";
-
     pgconn_t* db = DB(conn);
 
+    // Build a query suffix
     char query_suffix[128];
     snprintf(query_suffix, sizeof(query_suffix), "%s:*", query);
-    const char* params[] = {query_suffix};
-    PGresult* res        = pgconn_query_params(db, search_query, 1, params, nullptr);
+
+    // Assume only query is provided. Update is file_id is also provided.
+    const char* params[2];
+    int param_count          = 1;
+    params[0]                = query_suffix;
+    const char* search_query = NULL;
+
+    if (fileId) {
+        search_query =
+            "WITH query AS ("
+            "  SELECT websearch_to_tsquery('english', $1) as tsq"
+            "), "
+            "RankedChunks AS ("
+            "  SELECT "
+            "    p.file_id, f.name, f.num_pages, p.page_num, p.text, "
+            "    ts_rank(p.text_vector, query.tsq) as rank "
+            "  FROM pages p "
+            "  CROSS JOIN query "
+            "  JOIN files f ON p.file_id = f.id "
+            "  WHERE p.text_vector @@ query.tsq "
+            "    AND ts_rank(p.text_vector, query.tsq) >= 0.005 "
+            "    AND f.id = $2 "  // Add file_id filter
+            "), "
+            "UniquePages AS ("
+            "  SELECT DISTINCT ON (file_id, page_num) "
+            "    file_id, name, num_pages, page_num, text, rank "
+            "  FROM RankedChunks "
+            "  ORDER BY file_id, page_num, rank DESC"
+            ") "
+            "SELECT "
+            "  file_id, name, num_pages, page_num, "
+            "  ts_headline('english', text, (SELECT tsq FROM query), "
+            "    'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
+            "  rank "
+            "FROM UniquePages "
+            "ORDER BY rank DESC, name, page_num "
+            "LIMIT 100";
+        params[1]   = fileId;
+        param_count = 2;
+    } else {
+        search_query =
+            "WITH query AS ("
+            "  SELECT websearch_to_tsquery('english', $1) as tsq"
+            "), "
+            "RankedChunks AS ("
+            "  SELECT "
+            "    p.file_id, f.name, f.num_pages, p.page_num, p.text, "
+            "    ts_rank(p.text_vector, query.tsq) as rank "
+            "  FROM pages p "
+            "  CROSS JOIN query "
+            "  JOIN files f ON p.file_id = f.id "
+            "  WHERE p.text_vector @@ query.tsq "
+            "    AND ts_rank(p.text_vector, query.tsq) >= 0.005 "
+            "), "
+            "UniquePages AS ("
+            "  SELECT DISTINCT ON (file_id, page_num) "
+            "    file_id, name, num_pages, page_num, text, rank "
+            "  FROM RankedChunks "
+            "  ORDER BY file_id, page_num, rank DESC"
+            ") "
+            "SELECT "
+            "  file_id, name, num_pages, page_num, "
+            "  ts_headline('english', text, (SELECT tsq FROM query), "
+            "    'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
+            "  rank "
+            "FROM UniquePages "
+            "ORDER BY rank DESC, name, page_num "
+            "LIMIT 100";
+    }
+
+    PGresult* res = pgconn_query_params(db, search_query, param_count, params, nullptr);
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
         return;

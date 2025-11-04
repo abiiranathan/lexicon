@@ -43,7 +43,7 @@
         onclick={() => onResultClick(result)}
         tabindex="0"
         role="link"
-        onkeydown={(e) => {
+        onkeydown={(e: KeyboardEvent) => {
           if (e.key == "Enter") {
             onResultClick(result);
           }

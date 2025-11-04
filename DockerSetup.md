@@ -53,20 +53,18 @@ The `:ro` flag mounts the directory as read-only for safety.
 Once the services are running, build the search index:
 
 ```bash
-docker-compose exec lexicon /app/lexicon index \
-  --root /pdfs \
-  --min_pages 4 \
-  --pgconn postgresql://lexicon:lexicon_secret@postgres:5432/lexicon
+docker-compose exec lexicon /app/lexicon \
+  --pgconn "postgresql://lexicon:lexicon_secret@postgres:5432/lexicon?sslmode=disable" \
+  index --root /pdfs --min_pages 4
 ```
 
 To perform a dry-run first:
 
 ```bash
-docker-compose exec lexicon /app/lexicon index \
-  --root /pdfs \
-  --min_pages 4 \
-  --dryrun \
-  --pgconn postgresql://lexicon:lexicon_secret@postgres:5432/lexicon
+docker-compose exec lexicon /app/lexicon \
+  --pgconn "postgresql://lexicon:lexicon_secret@postgres:5432/lexicon?sslmode=disable" \
+  index --root /pdfs --min_pages 4 --dryrun
+
 ```
 
 ## Manual Docker Build
