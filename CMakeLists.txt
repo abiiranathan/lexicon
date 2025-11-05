@@ -23,7 +23,6 @@ add_executable(${PROJECT_NAME}
     lexicon.c 
     routes.c 
     cli.c 
-    cache.c 
     logger.c 
     pdf.c 
     pdf_preprocess.c

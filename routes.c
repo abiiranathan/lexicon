@@ -7,13 +7,13 @@
 #include <yyjson.h>
 #include "pdf.h"
 
-#include "cache.h"
+#include <solidc/cache.h>
 
 // Connections array with each worker getting its own connection.
 extern pgconn_t* connections[NUM_WORKERS];
 
-// Global response cache - initialize at startup with response_cache_create()
-static response_cache_t* g_response_cache = nullptr;
+// Global response cache - initialize at startup with cache_create()
+static cache_t* g_response_cache = nullptr;
 
 // Get current connection for worker.
 #define DB(conn) ((connections[(size_t)conn_worker_id(conn)]))
@@ -26,7 +26,7 @@ static response_cache_t* g_response_cache = nullptr;
  * @return true on success, false on failure.
  */
 bool init_response_cache(size_t capacity, uint32_t ttl_seconds) {
-    g_response_cache = response_cache_create(capacity, ttl_seconds);
+    g_response_cache = cache_create(capacity, ttl_seconds);
     return g_response_cache != nullptr;
 }
 
@@ -35,7 +35,7 @@ bool init_response_cache(size_t capacity, uint32_t ttl_seconds) {
  * Call this at application shutdown.
  */
 void destroy_response_cache(void) {
-    response_cache_destroy(g_response_cache);
+    cache_destroy(g_response_cache);
     g_response_cache = nullptr;
 }
 
@@ -46,7 +46,8 @@ void destroy_response_cache(void) {
  */
 static inline void send_json_error(PulsarConn* conn, const char* msg) {
     char json_str[128];
-    snprintf(json_str, sizeof(json_str) - 1, "{\"error\": \"%s\"}", msg ? msg : "Something wrong happened");
+    snprintf(json_str, sizeof(json_str) - 1, "{\"error\": \"%s\"}",
+             msg ? msg : "Something wrong happened");
     conn_send_json(conn, StatusBadRequest, json_str);
 }
 
@@ -55,6 +56,25 @@ static inline void send_json_error(PulsarConn* conn, const char* msg) {
 static inline void send_cache_json(PulsarConn* conn, const char* data, size_t len) {
     conn_set_content_type(conn, "application/json");
     conn_send(conn, StatusOK, data, len);
+}
+
+/**
+ * Generates a cache key for file/page lookups.
+ * @param buffer Buffer to store the key.
+ * @param buffer_size Size of the buffer.
+ * @param file_id File ID.
+ * @param page_num Page number (use -1 for file-only keys).
+ * @return Number of characters written (excluding null terminator).
+ */
+static inline int cache_make_key(char* buffer, size_t buffer_size, int64_t file_id, int page_num) {
+    if (!buffer || buffer_size == 0) {
+        return 0;
+    }
+    if (page_num >= 0) {
+        return snprintf(buffer, buffer_size, "file:%lld:page:%d", (long long)file_id, page_num);
+    } else {
+        return snprintf(buffer, buffer_size, "file:%lld", (long long)file_id);
+    }
 }
 
 /**
@@ -81,11 +101,11 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
 
     // Try cache first
     char cache_key[CACHE_KEY_MAX_LEN];
-    response_cache_make_key(cache_key, sizeof(cache_key), file_id, (int)page_num_ll);
+    cache_make_key(cache_key, sizeof(cache_key), file_id, (int)page_num_ll);
 
     char* cached_json = nullptr;
     size_t cached_len = 0;
-    if (response_cache_get(g_response_cache, cache_key, &cached_json, &cached_len)) {
+    if (cache_get(g_response_cache, cache_key, &cached_json, &cached_len)) {
         send_cache_json(conn, cached_json, cached_len);
         free(cached_json);
         return;
@@ -131,7 +151,7 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
     }
 
     // Cache the response
-    response_cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 0);
+    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 0);
 
     conn_send_json(conn, StatusOK, json_str);
 }
@@ -156,12 +176,14 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
 
     // Try cache first
     char cache_key[CACHE_KEY_MAX_LEN];
-    snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d", (long long)file_id, page_num);
+    snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d", (long long)file_id,
+             page_num);
 
     char* png_data  = nullptr;
     size_t png_size = 0;
-    if (response_cache_get(g_response_cache, cache_key, &png_data, &png_size)) {
-        static const char headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
+    if (cache_get(g_response_cache, cache_key, &png_data, &png_size)) {
+        static const char headers[] =
+            "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
         conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
         conn_write(conn, png_data, png_size);
         free(png_data);
@@ -195,12 +217,13 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
 
     png_buffer_t png_buffer = {0};
     if (render_page_from_document_to_buffer(path, page_num - 1, &png_buffer)) {
-        static const char headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
+        static const char headers[] =
+            "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
         conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
         conn_write(conn, png_buffer.data, png_buffer.size);
 
         // Cache the page for 60 seconds
-        response_cache_set(g_response_cache, cache_key, png_buffer.data, png_buffer.size, 60);
+        cache_set(g_response_cache, cache_key, png_buffer.data, png_buffer.size, 60);
     } else {
         conn_set_status(conn, StatusInternalServerError);
         send_json_error(conn, "Error writing PNG image");
@@ -230,7 +253,7 @@ void pdf_search(PulsarCtx* ctx) {
     // Try cache first
     char* cached_json = nullptr;
     size_t cached_len = 0;
-    if (response_cache_get(g_response_cache, cache_key, &cached_json, &cached_len)) {
+    if (cache_get(g_response_cache, cache_key, &cached_json, &cached_len)) {
         send_cache_json(conn, cached_json, cached_len);
         free(cached_json);
         return;
@@ -378,14 +401,15 @@ void pdf_search(PulsarCtx* ctx) {
     }
 
     // Cache the search results with shorter TTL (60 seconds)
-    response_cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 60);
+    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 60);
 
     conn_send_json(conn, StatusOK, json_str);
 }
 
 /**
  * Lists all PDF files in the database paginated on query params "page" & limit.
- * Returns JSON object with keys: "page", "limit", "results", "has_next", "has_prev","total_count", "total_pages".
+ * Returns JSON object with keys: "page", "limit", "results", "has_next", "has_prev","total_count",
+ * "total_pages".
  */
 void list_files(PulsarCtx* ctx) {
     PulsarConn* conn          = ctx->conn;
@@ -427,7 +451,7 @@ void list_files(PulsarCtx* ctx) {
     // Try cache first
     char* cached_json = nullptr;
     size_t cached_len = 0;
-    if (response_cache_get(g_response_cache, cache_key, &cached_json, &cached_len)) {
+    if (cache_get(g_response_cache, cache_key, &cached_json, &cached_len)) {
         send_cache_json(conn, cached_json, cached_len);
         free(cached_json);
         return;
@@ -469,16 +493,18 @@ void list_files(PulsarCtx* ctx) {
         // Filter by name using case-insensitive ILIKE
         char nameFilter[128];
         snprintf(nameFilter, sizeof(nameFilter), "%%%s%%", name);
-        query     = "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3";
-        params[0] = nameFilter;
-        params[1] = limit_str;
-        params[2] = offset_str;
+        query =
+            "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT "
+            "$2 OFFSET $3";
+        params[0]   = nameFilter;
+        params[1]   = limit_str;
+        params[2]   = offset_str;
         param_count = 3;
     } else {
         // No name filter
-        query       = "SELECT id, name, path, num_pages FROM files ORDER BY name LIMIT $1 OFFSET $2";
-        params[0]   = limit_str;
-        params[1]   = offset_str;
+        query     = "SELECT id, name, path, num_pages FROM files ORDER BY name LIMIT $1 OFFSET $2";
+        params[0] = limit_str;
+        params[1] = offset_str;
         param_count = 2;
     }
     PGresult* res = pgconn_query_params(db, query, param_count, params, nullptr);
@@ -560,7 +586,7 @@ void list_files(PulsarCtx* ctx) {
     }
 
     // Cache the list response
-    response_cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 0);
+    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 0);
 
     conn_send_json(conn, StatusOK, json_str);
 }
@@ -579,11 +605,11 @@ void get_file_by_id(PulsarCtx* ctx) {
 
     // Try cache first
     char cache_key[CACHE_KEY_MAX_LEN];
-    response_cache_make_key(cache_key, sizeof(cache_key), file_id, -1);
+    cache_make_key(cache_key, sizeof(cache_key), file_id, -1);
 
     char* cached_json = nullptr;
     size_t cached_len = 0;
-    if (response_cache_get(g_response_cache, cache_key, &cached_json, &cached_len)) {
+    if (cache_get(g_response_cache, cache_key, &cached_json, &cached_len)) {
         send_cache_json(conn, cached_json, cached_len);
         free(cached_json);
         return;
@@ -634,6 +660,6 @@ void get_file_by_id(PulsarCtx* ctx) {
     }
 
     // Cache the file metadata
-    response_cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 0);
+    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 0);
     conn_send_json(conn, StatusOK, json_str);
 }
