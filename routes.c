@@ -1,3 +1,4 @@
+#include <curl/curl.h>
 #include <pgconn/pgconn.h>
 #include <pgconn/pgtypes.h>
 #include <pulsar/pulsar.h>
@@ -75,6 +76,284 @@ static inline int cache_make_key(char* buffer, size_t buffer_size, int64_t file_
     } else {
         return snprintf(buffer, buffer_size, "file:%lld", (long long)file_id);
     }
+}
+
+// Structure to capture curl response
+typedef struct {
+    char* data;
+    size_t size;
+} curl_response_t;
+
+// Callback for curl to write response data
+static size_t _write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
+    size_t realsize       = size * nmemb;
+    curl_response_t* resp = (curl_response_t*)userp;
+
+    char* ptr = realloc(resp->data, resp->size + realsize + 1);
+    if (!ptr) {
+        return 0;  // Out of memory
+    }
+
+    resp->data = ptr;
+    memcpy(&(resp->data[resp->size]), contents, realsize);
+    resp->size += realsize;
+    resp->data[resp->size] = 0;
+
+    return realsize;
+}
+
+/**
+ * Calls Gemini API to generate AI summary for search results.
+ * Enhanced with better prompting to allow Gemini to provide comprehensive answers.
+ * @param query The search query
+ * @param context The context from search results (complete page content)
+ * @param api_key The Gemini API key
+ * @return Allocated string with AI summary (caller must free), or NULL on error
+ */
+static char* get_ai_summary(const char* query, const char* context, const char* api_key) {
+    if (!query || !context || !api_key) {
+        return NULL;
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return NULL;
+    }
+
+    curl_response_t response = {0};
+
+    // Build the API URL
+    char url[512];
+    snprintf(url, sizeof(url),
+             "https://generativelanguage.googleapis.com/v1beta/models/"
+             "gemini-2.0-flash:generateContent?key=%s",
+             api_key);
+
+    // Build the JSON request body
+    yyjson_mut_doc* req_doc = yyjson_mut_doc_new(NULL);
+    if (!req_doc) {
+        fprintf(stderr, "[AI Summary] Error: Failed to create JSON document\n");
+        curl_easy_cleanup(curl);
+        return NULL;
+    }
+
+    yyjson_mut_val* req_root = yyjson_mut_obj(req_doc);
+    yyjson_mut_doc_set_root(req_doc, req_root);
+
+    yyjson_mut_val* contents_arr = yyjson_mut_arr(req_doc);
+    yyjson_mut_val* content_obj  = yyjson_mut_obj(req_doc);
+    yyjson_mut_val* parts_arr    = yyjson_mut_arr(req_doc);
+    yyjson_mut_val* part_obj     = yyjson_mut_obj(req_doc);
+
+    // Enhanced prompt with complete page content and instructions for comprehensive answers
+    char* prompt       = NULL;
+    size_t context_len = strlen(context);
+    size_t prompt_size = context_len + 2048;  // Extra space for prompt template
+    prompt             = (char*)malloc(prompt_size);
+    if (!prompt) {
+        fprintf(stderr, "[AI Summary] Error: Failed to allocate memory for prompt\n");
+        yyjson_mut_doc_free(req_doc);
+        curl_easy_cleanup(curl);
+        return NULL;
+    }
+    defer({ free(prompt); });
+
+    snprintf(
+        prompt, prompt_size,
+        "You are an expert AI assistant helping users find information about their query. Queries "
+        "are mostly about Medical and Programming. "
+        "Use your comprehensive knowledge to provide a thorough, accurate answer. "
+        "PDF page excerpts are provided below as additional context to supplement your "
+        "response.\n\n"
+        "USER QUERY: \"%s\"\n\n"
+        "SUPPLEMENTARY PDF CONTEXT:\n"
+        "%s\n\n"
+        "INSTRUCTIONS:\n"
+        "1. Draw primarily on your expert knowledge to answer the user's query comprehensively\n"
+        "2. Use the provided PDF content to enhance, verify, or add specific details to your "
+        "answer\n"
+        "3. If the PDF content contradicts your knowledge or provides unique information, give it "
+        "appropriate weight\n"
+        "4. If the PDF pages are incomplete or don't fully address the query, fill in gaps with "
+        "your knowledge while being clear about what comes from which source\n"
+        "5. Synthesize information from multiple pages coherently when relevant\n"
+        "6. For MEDICAL MANAGEMENT/TREATMENT queries, provide COMPLETE and DETAILED information:\n"
+        "   - General/supportive management measures with full details\n"
+        "   - Pharmacological management with:\n"
+        "     * Specific drug names and formulations\n"
+        "     * Complete dosing regimens (adult AND pediatric doses)\n"
+        "     * Route of administration (oral, IV, IM, etc.)\n"
+        "     * Timing and frequency of administration\n"
+        "     * Duration of treatment\n"
+        "   - Management protocols for both uncomplicated and severe/complicated cases\n"
+        "   - Alternative treatment options when first-line therapy is unavailable or "
+        "contraindicated\n"
+        "   - Specific dosing adjustments (e.g., weight-based)\n"
+        "   - Include ALL relevant details from both your knowledge base and the provided context\n"
+        "7. Provide a well-structured, thorough response (typically 10-30 sentences for general "
+        "queries, longer for comprehensive treatment protocols)\n"
+        "8. Use ONLY valid HTML tags: <p>, <ul>, <li>, <ol>, <h3>, <h4>, <b>, <strong>, <em>, "
+        "<i>, <br>\n"
+        "9. Be accurate, detailed, and directly address the user's question\n\n"
+        "CRITICAL OUTPUT FORMAT REQUIREMENTS:\n"
+        "- Output ONLY raw HTML - NO markdown syntax\n"
+        "- Do NOT use code fences (```html or ```)\n"
+        "- Do NOT use markdown bold (**text**) - use <b>text</b> or <strong>text</strong>\n"
+        "- Do NOT use markdown italics (*text*) - use <i>text</i> or <em>text</em>\n"
+        "- Do NOT use markdown headers (# or ##) - use <h3> or <h4> tags\n"
+        "- Start immediately with an HTML tag (like <h3> or <p>)\n"
+        "- End with a closing HTML tag\n\n"
+        "Your response must be pure HTML that can be directly inserted into a webpage without "
+        "any preprocessing.",
+        query, context);
+
+    yyjson_mut_obj_add_str(req_doc, part_obj, "text", prompt);
+    yyjson_mut_arr_append(parts_arr, part_obj);
+    yyjson_mut_obj_add_val(req_doc, content_obj, "parts", parts_arr);
+    yyjson_mut_arr_append(contents_arr, content_obj);
+    yyjson_mut_obj_add_val(req_doc, req_root, "contents", contents_arr);
+
+    char* json_body = yyjson_mut_write(req_doc, 0, NULL);
+    yyjson_mut_doc_free(req_doc);
+
+    if (!json_body) {
+        fprintf(stderr, "[AI Summary] Error: Failed to serialize JSON request body\n");
+        curl_easy_cleanup(curl);
+        return NULL;
+    }
+    defer({ free(json_body); });
+
+    fprintf(stderr, "[AI Summary] Info: Sending request to Gemini API for query: \"%s\"\n", query);
+    fprintf(stderr, "[AI Summary] Info: Context size: %zu characters\n", context_len);
+
+    // Setup curl with longer timeout for larger context
+    struct curl_slist* headers = NULL;
+    headers                    = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);  // Increased timeout for larger context
+
+    CURLcode res = curl_easy_perform(curl);
+
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        fprintf(stderr, "[AI Summary] Error: curl_easy_perform() failed: %s (code: %d)\n",
+                curl_easy_strerror(res), res);
+        free(response.data);
+        return NULL;
+    }
+
+    if (http_code != 200) {
+        fprintf(stderr, "[AI Summary] Error: HTTP request failed with status code: %ld\n",
+                http_code);
+        if (response.data && response.size > 0) {
+            fprintf(stderr, "[AI Summary] Error response body: %.*s\n",
+                    (int)(response.size > 500 ? 500 : response.size), response.data);
+        }
+        free(response.data);
+        return NULL;
+    }
+
+    if (!response.data || response.size == 0) {
+        fprintf(stderr, "[AI Summary] Error: Empty response from API\n");
+        free(response.data);
+        return NULL;
+    }
+
+    fprintf(stderr, "[AI Summary] Info: Received response (%zu bytes)\n", response.size);
+
+    // Parse response to extract summary text
+    yyjson_doc* resp_doc = yyjson_read(response.data, response.size, 0);
+    if (!resp_doc) {
+        fprintf(stderr, "[AI Summary] Error: Failed to parse JSON response\n");
+        free(response.data);
+        return NULL;
+    }
+    free(response.data);
+    defer({ yyjson_doc_free(resp_doc); });
+
+    yyjson_val* root = yyjson_doc_get_root(resp_doc);
+    if (!root) {
+        fprintf(stderr, "[AI Summary] Error: No root object in JSON response\n");
+        return NULL;
+    }
+
+    // Check for error in response
+    yyjson_val* error_obj = yyjson_obj_get(root, "error");
+    if (error_obj) {
+        yyjson_val* error_msg = yyjson_obj_get(error_obj, "message");
+        const char* error_str = yyjson_get_str(error_msg);
+        fprintf(stderr, "[AI Summary] Error: API returned error: %s\n",
+                error_str ? error_str : "Unknown error");
+        return NULL;
+    }
+
+    yyjson_val* candidates = yyjson_obj_get(root, "candidates");
+    if (!candidates) {
+        fprintf(stderr, "[AI Summary] Error: No 'candidates' field in response\n");
+        return NULL;
+    }
+
+    if (!yyjson_is_arr(candidates)) {
+        fprintf(stderr, "[AI Summary] Error: 'candidates' is not an array\n");
+        return NULL;
+    }
+
+    yyjson_val* first_candidate = yyjson_arr_get_first(candidates);
+    if (!first_candidate) {
+        fprintf(stderr, "[AI Summary] Error: 'candidates' array is empty\n");
+        return NULL;
+    }
+
+    yyjson_val* content = yyjson_obj_get(first_candidate, "content");
+    if (!content) {
+        fprintf(stderr, "[AI Summary] Error: No 'content' field in candidate\n");
+        return NULL;
+    }
+
+    yyjson_val* parts = yyjson_obj_get(content, "parts");
+    if (!parts) {
+        fprintf(stderr, "[AI Summary] Error: No 'parts' field in content\n");
+        return NULL;
+    }
+
+    if (!yyjson_is_arr(parts)) {
+        fprintf(stderr, "[AI Summary] Error: 'parts' is not an array\n");
+        return NULL;
+    }
+
+    yyjson_val* first_part = yyjson_arr_get_first(parts);
+    if (!first_part) {
+        fprintf(stderr, "[AI Summary] Error: 'parts' array is empty\n");
+        return NULL;
+    }
+
+    yyjson_val* text = yyjson_obj_get(first_part, "text");
+    if (!text) {
+        fprintf(stderr, "[AI Summary] Error: No 'text' field in part\n");
+        return NULL;
+    }
+
+    if (!yyjson_is_str(text)) {
+        fprintf(stderr, "[AI Summary] Error: 'text' field is not a string\n");
+        return NULL;
+    }
+
+    const char* summary_text = yyjson_get_str(text);
+    if (!summary_text) {
+        fprintf(stderr, "[AI Summary] Error: Failed to extract text string\n");
+        return NULL;
+    }
+    return strdup(summary_text);
 }
 
 /**
@@ -234,6 +513,7 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
 /**
  * Performs full-text search on PDF pages.
  * Returns matching results with snippets, ranked by relevance.
+ * Fetches complete page content and sends to Gemini for AI-powered answers.
  */
 void pdf_search(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
@@ -265,7 +545,7 @@ void pdf_search(PulsarCtx* ctx) {
     char query_suffix[128];
     snprintf(query_suffix, sizeof(query_suffix), "%s:*", query);
 
-    // Assume only query is provided. Update is file_id is also provided.
+    // Assume only query is provided. Update if file_id is also provided.
     const char* params[2];
     int param_count          = 1;
     params[0]                = query_suffix;
@@ -285,7 +565,7 @@ void pdf_search(PulsarCtx* ctx) {
             "  JOIN files f ON p.file_id = f.id "
             "  WHERE p.text_vector @@ query.tsq "
             "    AND ts_rank(p.text_vector, query.tsq) >= 0.005 "
-            "    AND f.id = $2 "  // Add file_id filter
+            "    AND f.id = $2 "
             "), "
             "UniquePages AS ("
             "  SELECT DISTINCT ON (file_id, page_num) "
@@ -295,9 +575,8 @@ void pdf_search(PulsarCtx* ctx) {
             ") "
             "SELECT "
             "  file_id, name, num_pages, page_num, "
-            "  ts_headline('english', text, (SELECT tsq FROM query), "
-            "    'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
-            "  rank "
+            "  LEFT(text, 500) as snippet, "
+            "  text as full_text "  // Add full text
             "FROM UniquePages "
             "ORDER BY rank DESC, name, page_num "
             "LIMIT 100";
@@ -326,9 +605,8 @@ void pdf_search(PulsarCtx* ctx) {
             ") "
             "SELECT "
             "  file_id, name, num_pages, page_num, "
-            "  ts_headline('english', text, (SELECT tsq FROM query), "
-            "    'MaxWords=30, MinWords=10, MaxFragments=3') as snippet, "
-            "  rank "
+            "  LEFT(text, 500) as snippet, "
+            "  text as full_text "  // Add full text
             "FROM UniquePages "
             "ORDER BY rank DESC, name, page_num "
             "LIMIT 100";
@@ -354,25 +632,90 @@ void pdf_search(PulsarCtx* ctx) {
 
     yyjson_mut_val* results_array = yyjson_mut_arr(doc);
 
-    int ntuples = PQntuples(res);
-    bool file_id_valid, page_num_valid, rank_valid, num_pages_valid;
+    // Build context from complete page content (top 10 results)
+    // Use dynamic allocation to handle larger context
+    size_t context_capacity = 64 * 1024;  // Start with 64KB
+    char* context           = (char*)malloc(context_capacity);
+    if (!context) {
+        send_json_error(conn, "Failed to allocate memory for context");
+        return;
+    }
+    defer({ free(context); });
+
+    context[0]         = '\0';
+    size_t context_len = 0;
+    int ntuples        = PQntuples(res);
+    bool file_id_valid, page_num_valid, num_pages_valid;
+
+    // Limit to top 20 pages for context to avoid token limits
+    int context_limit = (ntuples < 20) ? ntuples : 20;
 
     for (int i = 0; i < ntuples; i++) {
         int64_t file_id;
         int page_num, num_pages;
-        double rank;
 
         // Parse all numeric fields - skip row if any fail
         file_id   = pg_get_longlong(res, i, 0, &file_id_valid);
         num_pages = pg_get_int(res, i, 2, &num_pages_valid);
         page_num  = pg_get_int(res, i, 3, &page_num_valid);
-        rank      = pg_get_double(res, i, 5, &rank_valid);
-        if (!file_id_valid || !page_num_valid || !rank_valid || !num_pages_valid) {
+        if (!file_id_valid || !page_num_valid || !num_pages_valid) {
             continue;
         }
 
         const char* file_name = PQgetvalue(res, i, 1);
         const char* snippet   = PQgetvalue(res, i, 4);
+        const char* full_text = PQgetvalue(res, i, 5);  // Get full text
+
+        ASSERT(file_name);  // we must have a filename
+        ASSERT(full_text);  // we must have some text
+
+        // Build context from first N results with COMPLETE page content
+        if (i < context_limit) {
+            // Calculate space needed
+            int header_len_int = snprintf(NULL, 0, "\n=== PAGE %d: [%s, Page %d of %d] ===\n\n",
+                                          i + 1, file_name, page_num, num_pages);
+            if (header_len_int < 0) {
+                continue;  // snprintf error, skip this entry
+            }
+
+            size_t full_text_len = strlen(full_text);
+            size_t needed =
+                context_len + (size_t)header_len_int + full_text_len + 3;  // +3 for "\n\n" + null
+
+            // Reallocate if needed
+            if (needed > context_capacity) {
+                size_t new_capacity = context_capacity * 2;
+                while (new_capacity < needed) {
+                    new_capacity *= 2;
+                }
+                char* new_context = (char*)realloc(context, new_capacity);
+                if (!new_context) {
+                    fprintf(stderr, "[PDF Search] Warning: Failed to expand context buffer\n");
+                    break;  // Stop adding to context but continue with what we have
+                }
+                context          = new_context;
+                context_capacity = new_capacity;
+            }
+
+            // Add header
+            int written = snprintf(context + context_len, context_capacity - context_len,
+                                   "\n=== PAGE %d: [%s, Page %d of %d] ===\n\n", i + 1,
+                                   file_name ? file_name : "Unknown", page_num, num_pages);
+
+            if (written > 0) {
+                context_len += (size_t)written;
+
+                // Add full page text
+                size_t remaining = context_capacity - context_len - 1;
+                if (full_text_len < remaining) {
+                    memcpy(context + context_len, full_text, full_text_len);
+                    context_len += full_text_len;
+                    context[context_len++] = '\n';
+                    context[context_len++] = '\n';
+                    context[context_len]   = '\0';
+                }
+            }
+        }
 
         yyjson_mut_val* result_obj = yyjson_mut_obj(doc);
         if (!result_obj) {
@@ -384,8 +727,6 @@ void pdf_search(PulsarCtx* ctx) {
         yyjson_mut_obj_add_int(doc, result_obj, "page_num", page_num);
         yyjson_mut_obj_add_int(doc, result_obj, "num_pages", num_pages);
         yyjson_mut_obj_add_str(doc, result_obj, "snippet", snippet ? snippet : "");
-        yyjson_mut_obj_add_real(doc, result_obj, "rank", rank);
-
         yyjson_mut_arr_append(results_array, result_obj);
     }
 
@@ -393,15 +734,41 @@ void pdf_search(PulsarCtx* ctx) {
     yyjson_mut_obj_add_uint(doc, root, "count", yyjson_mut_arr_size(results_array));
     yyjson_mut_obj_add_str(doc, root, "query", query);
 
+    // Get AI summary with COMPLETE page content if we have results and API key
+    const char* api_key = getenv("GEMINI_API_KEY");
+
+    // Skip searches within the book itself.
+    if (api_key && ntuples > 0 && context_len > 0 && fileId == NULL) {
+        fprintf(stderr,
+                "[PDF Search] Info: Sending %zu characters of full page content to Gemini\n",
+                context_len);
+        char* ai_summary = get_ai_summary(query, context, api_key);
+        if (ai_summary) {
+            size_t summary_len          = strlen(ai_summary);
+            yyjson_mut_val* summary_val = yyjson_mut_strncpy(doc, ai_summary, summary_len);
+            if (summary_val) {
+                yyjson_mut_obj_add_val(doc, root, "ai_summary", summary_val);
+            } else {
+                yyjson_mut_obj_add_null(doc, root, "ai_summary");
+            }
+            free(ai_summary);
+        } else {
+            yyjson_mut_obj_add_null(doc, root, "ai_summary");
+        }
+    } else {
+        yyjson_mut_obj_add_null(doc, root, "ai_summary");
+    }
+
     // Serialize to string
-    char* json_str = yyjson_mut_write(doc, 0, nullptr);
+    size_t jsonlen = 0;
+    char* json_str = yyjson_mut_write(doc, 0, &jsonlen);
     if (!json_str) {
         send_json_error(conn, "Failed to serialize JSON");
         return;
     }
 
     // Cache the search results with shorter TTL (60 seconds)
-    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 60);
+    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, jsonlen, 60);
 
     conn_send_json(conn, StatusOK, json_str);
 }
@@ -653,13 +1020,14 @@ void get_file_by_id(PulsarCtx* ctx) {
     yyjson_mut_obj_add_str(doc, root, "path", file_path ? file_path : "");
     yyjson_mut_obj_add_int(doc, root, "num_pages", (int)num_pages);
 
-    char* json_str = yyjson_mut_write(doc, 0, nullptr);
+    size_t length  = 0;
+    char* json_str = yyjson_mut_write(doc, 0, &length);
     if (!json_str) {
         send_json_error(conn, "Failed to serialize JSON");
         return;
     }
 
     // Cache the file metadata
-    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 0);
+    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, length, 0);
     conn_send_json(conn, StatusOK, json_str);
 }

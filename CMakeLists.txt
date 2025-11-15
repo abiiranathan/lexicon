@@ -36,6 +36,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     yyjson # https://github.com/ibireme/yyjson
     m      # math library
     z      # zlib
+    curl   # libcurl
     ${POPPLER_GLIB_LIBRARIES}
     ${PostgreSQL_LIBRARIES}
     gio-2.0

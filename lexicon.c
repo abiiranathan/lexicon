@@ -1,3 +1,4 @@
+#include <curl/curl.h>
 #include <pgconn/pgconn.h>
 #include <pulsar/pulsar.h>
 #include <solidc/defer.h>
@@ -153,13 +154,16 @@ int main(int argc, char* argv[]) {
 
     Command* idxcmd = AddCommand("index", "Build PDF index into the database", build_index);
     AddFlagCmd_STRING(idxcmd, "root", 'r', "Root directory of pdfs", &config.root_dir, true);
-    AddFlagCmd_INT(idxcmd, "min_pages", 'p', "Minimum number of pages in PDF to be indexed", &config.min_pages, false);
-    AddFlagCmd_BOOL(idxcmd, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun, false);
+    AddFlagCmd_INT(idxcmd, "min_pages", 'p', "Minimum number of pages in PDF to be indexed",
+                   &config.min_pages, false);
+    AddFlagCmd_BOOL(idxcmd, "dryrun", 'r', "Perform dry-run without commiting changes",
+                    &config.dryrun, false);
 
     FlagParse(argc, argv, pre_exec_func, NULL);
 
-    // Register all routes
+    curl_global_init(0);
 
+    // Register all routes
     route_register("/api/search", HTTP_GET, pdf_search);
     route_register("/api/list-files", HTTP_GET, list_files);
     route_register("/api/list-files/{file_id}", HTTP_GET, get_file_by_id);
@@ -183,5 +187,6 @@ int main(int argc, char* argv[]) {
 
     closeConnections();
     destroy_response_cache();
+    curl_global_cleanup();
     return code;
 }

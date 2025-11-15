@@ -196,11 +196,6 @@ The service uses an in-memory LRU cache with the following TTLs:
 | File listings  | 5 min | Moderate volatility |
 | Search results | 1 min | Query-dependent     |
 
-Cache settings in `main.c`:
-```c
-init_response_cache(1024, 300);  // 1024 entries, 300 sec default TTL
-```
-
 Adjust capacity and TTL based on your workload.
 
 ## Performance Tuning
@@ -220,16 +215,14 @@ CREATE INDEX idx_pages_lookup ON pages(file_id, page_num);
 When updating the database externally, clear the cache:
 ```c
 // In your update/delete handlers
-response_cache_clear(g_response_cache);  // Clear all
+cache_clear(g_response_cache);  // Clear all
 
 // Or invalidate specific entries
-char key[CACHE_KEY_MAX_LEN];
-response_cache_make_key(key, sizeof(key), file_id, page_num);
-response_cache_invalidate(g_response_cache, key);
+cache_invalidate(g_response_cache, key);
 ```
 
 ### Worker Threads
-Adjust `NUM_WORKERS` in your build configuration (default: 8) based on CPU cores and expected load.
+Adjust `NUM_WORKERS` in your build configuration (default: 4) based on CPU cores and expected load.
 
 ## Web Interface
 

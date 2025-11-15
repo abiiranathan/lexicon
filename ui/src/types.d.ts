@@ -28,6 +28,7 @@ type SearchResult = {
     snippet: string;
     rank: number;
     num_pages: number;
+    ai_summary: string | null;
 }
 
 type ModalContentType = {

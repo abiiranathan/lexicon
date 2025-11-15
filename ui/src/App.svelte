@@ -217,9 +217,11 @@
 <div class="container">
   <header class="header">
     <div class="logo-section">
-      <img src="/favicon-96x96.png" alt="Logo" width="96" height="96" />
+      <a href="/"
+        ><img src="/favicon-96x96.png" alt="Logo" width="96" height="96" /></a
+      >
       <div class="logo-text">
-        <h1>Lexicon</h1>
+        <h1><a href="/">Lexicon</a></h1>
         <p class="tagline">
           Lightning-fast semantic search across your entire document library
         </p>
