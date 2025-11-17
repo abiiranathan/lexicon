@@ -7,10 +7,12 @@ services:
       POSTGRES_USER: lexicon
       POSTGRES_PASSWORD: lexicon_secret
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data/pgdata
+      - ./postgres_data:/var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lexicon"]
       interval: 10s

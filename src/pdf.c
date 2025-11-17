@@ -1,4 +1,4 @@
-#include "pdf.h"
+#include "../include/pdf.h"
 #include <string.h>  // for memcpy
 
 /** Global mutex to serialize Cairo operations (Cairo is not fully thread-safe). */

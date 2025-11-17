@@ -1,4 +1,6 @@
-#include "cli.h"
+#include "../include/cli.h"
+#include "../include/pdf_preprocess.h"
+
 #include <poppler/glib/poppler.h>
 #include <pulsar/macros.h>
 #include <solidc/defer.h>

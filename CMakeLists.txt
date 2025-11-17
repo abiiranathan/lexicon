@@ -20,12 +20,13 @@ pkg_check_modules(POPPLER_GLIB REQUIRED poppler-glib)
 # The executable needs ./ui/dist svelte frontend served at / route.
 # Build with: `cd ui` && `npm run build`
 add_executable(${PROJECT_NAME} 
-    lexicon.c 
-    routes.c 
-    cli.c 
-    logger.c 
-    pdf.c 
-    pdf_preprocess.c
+    src/lexicon.c 
+    src/routes.c 
+    src/cli.c 
+    src/logger.c 
+    src/pdf.c 
+    src/pdf_preprocess.c
+    src/ai.c
 )
 
 # All dependencies from abiiranathan can be built from source with cmake

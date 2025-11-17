@@ -19,7 +19,7 @@ static thread_local char log_buffer[LOG_BUFFER_SIZE];
  * @param ctx The Pulsar context containing request/response data.
  * @param total_ns Total request duration in nanoseconds.
  */
-extern void logger(PulsarCtx* ctx, uint64_t total_ns) {
+void logger(PulsarCtx* ctx, uint64_t total_ns) {
     PulsarConn* conn        = ctx->conn;
     const char* method      = req_method(conn);
     const char* path        = req_path(conn);

@@ -36,6 +36,7 @@
   let currentPage = $state(1);
   let pageLimit = $state(25);
   let isSearching = $state(false);
+  let duration = $state(0);
   let isLoadingFiles = $state(false);
   let searchError = $state<string | null>(null);
   let filesError = $state<string | null>(null);
@@ -92,6 +93,7 @@
     isSearching = true;
     searchError = null;
 
+    const start = performance.now();
     try {
       const data = await searchAPI(query);
 
@@ -105,6 +107,7 @@
     } finally {
       isSearching = false;
     }
+    duration = performance.now() - start;
   }
 
   async function loadFiles(
@@ -242,6 +245,7 @@
         query={searchQuery.value}
         results={searchResults}
         isLoading={isSearching}
+        {duration}
         error={searchError}
         onResultClick={(result: SearchResult) => {
           viewPage(

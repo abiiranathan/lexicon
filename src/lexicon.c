@@ -5,7 +5,10 @@
 #include <solidc/flag.h>
 #include <solidc/macros.h>
 
-#include "cli.h"
+#include "../include/ai.h"
+#include "../include/cli.h"
+#include "../include/logger.h"
+#include "../include/routes.h"
 
 #define INFO(msg) printf(">>> %s\n", msg);
 
@@ -17,14 +20,6 @@ typedef struct {
     int min_pages;    // Minimum number of pages in a PDF to be indexable. Default is 4
     bool dryrun;      // Perform dry-run
 } server_config_t;
-
-extern void pdf_search(PulsarCtx* ctx);
-extern void list_files(PulsarCtx* ctx);
-extern void get_file_by_id(PulsarCtx* ctx);
-extern void get_page_by_file_and_page(PulsarCtx* ctx);
-extern void render_pdf_page_as_png(PulsarCtx* ctx);
-extern bool init_response_cache(size_t capacity, uint32_t ttl_seconds);
-extern void destroy_response_cache();
 
 // Static pool of postgres connections.
 // Each connections is used for a single thread run by pulsar server.
@@ -136,9 +131,6 @@ static void build_index(Command* cmd) {
     exit(EXIT_SUCCESS);
 }
 
-// Provided by logger.c
-extern void logger(PulsarCtx* ctx, uint64_t total_ns);
-
 void cors(PulsarCtx* ctx) {
     /* Add CORS headers for cross-origin clients */
     const char* cors_hdr =
@@ -147,21 +139,32 @@ void cors(PulsarCtx* ctx) {
     conn_writeheader_raw(ctx->conn, cors_hdr, strlen(cors_hdr));
 }
 
+static void init() {
+    curl_global_init(0);
+    ASSERT(init_response_cache(1024, 300));  // 1024 entries, 300 sec TTL
+    ASSERT(init_ai_cache(500, 24 * 60 * 60));
+}
+
+static void cleanup() {
+    closeConnections();
+    destroy_response_cache();
+    destroy_ai_cache();
+    curl_global_cleanup();
+}
+
 int main(int argc, char* argv[]) {
+    init();
+
     AddFlag_INT("port", 'p', "The server port", &config.port, false);
     AddFlag_STRING("addr", 'a', "Bind address", &config.bind_addr, false);
     AddFlag_STRING("pgconn", 'c', "Postgres connection URI", &config.pgconn, true);
 
     Command* idxcmd = AddCommand("index", "Build PDF index into the database", build_index);
     AddFlagCmd_STRING(idxcmd, "root", 'r', "Root directory of pdfs", &config.root_dir, true);
-    AddFlagCmd_INT(idxcmd, "min_pages", 'p', "Minimum number of pages in PDF to be indexed",
-                   &config.min_pages, false);
-    AddFlagCmd_BOOL(idxcmd, "dryrun", 'r', "Perform dry-run without commiting changes",
-                    &config.dryrun, false);
+    AddFlagCmd_INT(idxcmd, "min_pages", 'p', "Minimum number of pages in PDF to be indexed", &config.min_pages, false);
+    AddFlagCmd_BOOL(idxcmd, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun, false);
 
     FlagParse(argc, argv, pre_exec_func, NULL);
-
-    curl_global_init(0);
 
     // Register all routes
     route_register("/api/search", HTTP_GET, pdf_search);
@@ -174,19 +177,14 @@ int main(int argc, char* argv[]) {
 
     // Since we are using / for static assets, put at the end to avoid collisions
     route_static("/", "./ui/dist");
-
     pulsar_set_callback(logger);
 
     Middleware mw[] = {cors};
     use_global_middleware(mw, sizeof(mw) / sizeof(mw[0]));
 
-    init_response_cache(1024, 300);  // 1024 entries, 300 sec TTL
-
     int code = pulsar_run(config.bind_addr, config.port);
     printf("Server exited with status code: %d\n", code);
 
-    closeConnections();
-    destroy_response_cache();
-    curl_global_cleanup();
+    cleanup();
     return code;
 }

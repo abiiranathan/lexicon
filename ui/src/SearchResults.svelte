@@ -1,5 +1,5 @@
 <script lang="ts">
-  let { query, results, isLoading, error, onResultClick } = $props();
+  let { query, results, duration, isLoading, error, onResultClick } = $props();
 
   let aiSummary = $derived.by(() => {
     if (!results.ai_summary) {
@@ -35,7 +35,8 @@
   </div>
 {:else if results && results.results && results.results.length > 0}
   <div class="search-stats">
-    <span>Found {results.count} results</span>
+    <span>Found {results.count} results in {(duration / 1000).toFixed(0)}s</span
+    >
   </div>
 
   {#if aiSummary}
