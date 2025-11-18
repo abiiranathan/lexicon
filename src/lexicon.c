@@ -2,6 +2,7 @@
 #include <pgconn/pgconn.h>
 #include <pulsar/pulsar.h>
 #include <solidc/defer.h>
+#include <solidc/dotenv.h>
 #include <solidc/flag.h>
 #include <solidc/macros.h>
 
@@ -108,8 +109,19 @@ static void create_schema(pgconn_t* conn) {
     INFO("Tables created successfully");
 }
 
+void ensure_valid_pgconn() {
+    if (config.pgconn == NULL) {
+        config.pgconn = getenv("PGCONN");
+        if (config.pgconn == NULL) {
+            puts("PGCONN environment variable must be set or pass --pgconn flag to the program");
+            exit(1);
+        }
+    }
+}
+
 // Connect to database before invoking handler.
 static void pre_exec_func(void*) {
+    ensure_valid_pgconn();
     initConnections();
     create_schema(connections[0]);
 }
@@ -153,11 +165,15 @@ static void cleanup() {
 }
 
 int main(int argc, char* argv[]) {
+    // Load .env if exists
+    load_dotenv(".env");
+
     init();
+    ensure_valid_pgconn();
 
     AddFlag_INT("port", 'p', "The server port", &config.port, false);
     AddFlag_STRING("addr", 'a', "Bind address", &config.bind_addr, false);
-    AddFlag_STRING("pgconn", 'c', "Postgres connection URI", &config.pgconn, true);
+    AddFlag_STRING("pgconn", 'c', "Postgres connection URI", &config.pgconn, false);
 
     Command* idxcmd = AddCommand("index", "Build PDF index into the database", build_index);
     AddFlagCmd_STRING(idxcmd, "root", 'r', "Root directory of pdfs", &config.root_dir, true);
