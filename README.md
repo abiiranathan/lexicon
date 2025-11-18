@@ -1,6 +1,6 @@
 # Lexicon
 
-A high-performance full-text search service for PDF documents with web-based UI. Built with C, PostgreSQL full-text search, and an in-memory LRU cache for fast response times.
+A high-performance full-text search service for PDF documents with web-based UI. Built with C, PostgreSQL full-text search and AI integration, and an in-memory LRU cache for fast response times.
 
 ## Features
 
@@ -222,7 +222,7 @@ cache_invalidate(g_response_cache, key);
 ```
 
 ### Worker Threads
-Adjust `NUM_WORKERS` in your build configuration (default: 4) based on CPU cores and expected load.
+Adjust `NUM_WORKERS` in your build configuration (default: 8) based on CPU cores and expected load.
 
 ## Web Interface
 

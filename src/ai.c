@@ -7,7 +7,7 @@
 #include <yyjson.h>
 
 // In-memory cache for AI responses.
-static cache_t* ai_cache = NULL;
+static cache_t* ai_response_cache = NULL;
 
 // Structure to capture curl response
 typedef struct {
@@ -41,8 +41,8 @@ static size_t _write_callback(void* contents, size_t size, size_t nmemb, void* u
  * @return true on success, false on failure.
  */
 bool init_ai_cache(size_t capacity, uint32_t ttl_seconds) {
-    ai_cache = cache_create(capacity, ttl_seconds);
-    return ai_cache != NULL;
+    ai_response_cache = cache_create(capacity, ttl_seconds);
+    return ai_response_cache != NULL;
 }
 
 /**
@@ -50,8 +50,8 @@ bool init_ai_cache(size_t capacity, uint32_t ttl_seconds) {
  * Call this at application shutdown.
  */
 void destroy_ai_cache(void) {
-    cache_destroy(ai_cache);
-    ai_cache = NULL;
+    cache_destroy(ai_response_cache);
+    ai_response_cache = NULL;
 }
 
 /**
@@ -291,10 +291,12 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
     }
 
     // Check the cache first
-    char* gem_res = NULL;
-    size_t outlen = 0;
-    if (cache_get(ai_cache, query, &gem_res, &outlen)) {
-        return gem_res;
+    char* gemini_resp = NULL;
+    if (ai_response_cache) {
+        size_t outlen = 0;
+        if (cache_get(ai_response_cache, query, &gemini_resp, &outlen)) {
+            return gemini_resp;
+        }
     }
 
     // Get model name (allow override via env var)
@@ -339,14 +341,14 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
     defer({ free(response.data); });
 
     // Parse response
-    gem_res = _parse_gemini_response(response.data, response.size);
+    gemini_resp = _parse_gemini_response(response.data, response.size);
 
     // Cache the response
-    if (gem_res) {
-        if (!cache_set(ai_cache, query, (uint8_t*)gem_res, strlen(gem_res), 0)) {
+    if (gemini_resp && ai_response_cache) {
+        if (!cache_set(ai_response_cache, query, (uint8_t*)gemini_resp, strlen(gemini_resp), 0)) {
             LOG_ERROR("Caching AI response failed");
         }
     }
 
-    return gem_res;
+    return gemini_resp;
 }
