@@ -27,6 +27,7 @@ add_executable(${PROJECT_NAME}
     src/pdf.c 
     src/pdf_preprocess.c
     src/ai.c
+    src/database.c
 )
 
 # All dependencies from abiiranathan can be built from source with cmake

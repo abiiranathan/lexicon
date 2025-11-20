@@ -1,25 +1,18 @@
-#include <pgconn/pgconn.h>
 #include <pgconn/pgtypes.h>
 #include <pulsar/pulsar.h>
 #include <solidc/cache.h>
 #include <solidc/defer.h>
 #include <solidc/macros.h>
 #include <solidc/str_to_num.h>
-#include <string.h>
 #include <yyjson.h>
 
 #include "../include/ai.h"
+#include "../include/database.h"
 #include "../include/pdf.h"
 #include "../include/routes.h"
 
-// Connections array with each worker getting its own connection.
-extern pgconn_t* connections[NUM_WORKERS];
-
-// Global response cache - initialize at startup with cache_create()
+// Global response cache
 static cache_t* g_response_cache = NULL;
-
-// Get current connection for worker.
-#define DB(conn) ((connections[(size_t)conn_worker_id(conn)]))
 
 /**
  * Initializes the global response cache.
@@ -113,10 +106,10 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
         return;
     }
 
+    pgconn_t* db             = get_pgconn(conn);
     static const char* query = "SELECT text FROM pages WHERE file_id=$1 AND page_num=$2 LIMIT 1";
     const char* params[]     = {file_id_str, page_num_str};
 
-    pgconn_t* db  = DB(conn);
     PGresult* res = pgconn_query_params(db, query, 2, params, nullptr);
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
@@ -193,7 +186,7 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
     const char* params[]     = {file_id_str};
 
-    pgconn_t* db  = DB(conn);
+    pgconn_t* db  = get_pgconn(conn);
     PGresult* res = pgconn_query_params(db, query, 1, params, nullptr);
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
@@ -259,7 +252,7 @@ void pdf_search(PulsarCtx* ctx) {
         return;
     }
 
-    pgconn_t* db = DB(conn);
+    pgconn_t* db = get_pgconn(conn);
 
     // Build a query suffix
     char query_suffix[128];
@@ -555,7 +548,7 @@ void list_files(PulsarCtx* ctx) {
         return;
     }
 
-    pgconn_t* db = DB(conn);
+    pgconn_t* db = get_pgconn(conn);
 
     // First, get the total count of files
     const char* count_query = "SELECT COUNT(*) FROM files";
@@ -716,7 +709,7 @@ void get_file_by_id(PulsarCtx* ctx) {
     static const char* query = "SELECT name, path, num_pages FROM files WHERE id=$1 LIMIT 1";
     const char* params[]     = {file_id_str};
 
-    pgconn_t* db  = DB(conn);
+    pgconn_t* db  = get_pgconn(conn);
     PGresult* res = pgconn_query_params(db, query, 1, params, NULL);
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
@@ -747,8 +740,8 @@ void get_file_by_id(PulsarCtx* ctx) {
     yyjson_mut_doc_set_root(doc, root);
 
     yyjson_mut_obj_add_int(doc, root, "id", file_id);
-    yyjson_mut_obj_add_str(doc, root, "name", file_name ? file_name : "");
-    yyjson_mut_obj_add_str(doc, root, "path", file_path ? file_path : "");
+    yyjson_mut_obj_add_str(doc, root, "name", file_name);
+    yyjson_mut_obj_add_str(doc, root, "path", file_path);
     yyjson_mut_obj_add_int(doc, root, "num_pages", (int)num_pages);
 
     size_t length  = 0;

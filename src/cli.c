@@ -198,11 +198,12 @@ static WalkDirOption walk_dir_callback(const char* path, const char* name, void*
     }
 
     // Skip common build/dependency directories
-    static const char* skip_dirs[] = {"node_modules", ".git",   ".svn",     ".hg",    "__pycache__", ".pytest_cache",
-                                      ".mypy_cache",  ".tox",   "venv",     ".venv",  "env",         ".env",
-                                      "vendor",       "build",  "dist",     "target", ".gradle",     ".idea",
-                                      ".vscode",      ".cache", "coverage", ".next",  ".nuxt",       ".turbo",
-                                      ".DS_Store",    NULL};
+    static const char* skip_dirs[] = {
+        "node_modules", ".git",   ".svn",    ".hg",       "__pycache__", ".pytest_cache", ".mypy_cache",
+        ".tox",         "venv",   ".venv",   "env",       ".env",        "vendor",        "build",
+        "dist",         "target", ".gradle", ".idea",     ".vscode",     ".cache",        "coverage",
+        ".next",        ".nuxt",  ".turbo",  ".DS_Store", NULL,
+    };
 
     for (size_t i = 0; skip_dirs[i] != NULL; i++) {
         if (strcmp(name, skip_dirs[i]) == 0) {
