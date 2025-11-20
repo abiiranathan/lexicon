@@ -184,8 +184,11 @@ void pdf_search(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     ASSERT(g_response_cache);
 
-    const char* fileId = query_get(conn, "file_id");
-    const char* query  = query_get(conn, "q");
+    const char* fileId     = query_get(conn, "file_id");
+    const char* query      = query_get(conn, "q");
+    const char* ai_enabled = query_get(conn, "ai_enabled");
+    const bool use_ai      = ai_enabled && strcmp(ai_enabled, "true") == 0;
+
     if (!query || query[0] == '\0') {
         send_json_error(conn, "Missing search query");
         return;
@@ -345,10 +348,13 @@ void pdf_search(PulsarCtx* ctx) {
         }
     }
 
-    char* ai_summary    = NULL;
-    const char* api_key = getenv("GEMINI_API_KEY");
-    if (api_key && context_len > 0 && fileId == NULL) {
-        TIME_BLOCK("GEMINI API CALL", { ai_summary = get_ai_summary(query, context, api_key); });
+    char* ai_summary = NULL;
+
+    if (use_ai) {
+        const char* api_key = getenv("GEMINI_API_KEY");
+        if (api_key && context_len > 0 && fileId == NULL) {
+            TIME_BLOCK("GEMINI API CALL", { ai_summary = get_ai_summary(query, context, api_key); });
+        }
     }
 
     // --- Use JSON Generator ---

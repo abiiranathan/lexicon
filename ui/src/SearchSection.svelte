@@ -6,9 +6,16 @@
     currentTab: LocalStore<string>;
     onsubmit: () => void;
     onTabSwitch: (tab: string) => void;
+    useAI: boolean;
   };
 
-  let { searchQuery, currentTab, onsubmit, onTabSwitch }: Props = $props();
+  let {
+    searchQuery,
+    currentTab,
+    onsubmit,
+    onTabSwitch,
+    useAI = $bindable(),
+  }: Props = $props();
   let query = $state(searchQuery.value);
 
   $effect(() => {
@@ -23,7 +30,7 @@
       class="search-input"
       placeholder="Search through your documents..."
       bind:value={query}
-      onkeypress={(e) => e.key === "Enter" && onsubmit()}
+      onkeypress={(e: any) => e.key === "Enter" && onsubmit()}
       autocomplete="off"
     />
     <!-- svelte-ignore a11y_consider_explicit_label -->
@@ -57,6 +64,10 @@
     >
       Browse Files
     </button>
+    <section class="ai-section">
+      <input type="checkbox" id="ai_enabled" bind:checked={useAI} />
+      <label for="ai_enabled">Generate AI Summary</label>
+    </section>
   </div>
 </section>
 
@@ -150,6 +161,17 @@
 
     .tabs {
       flex-wrap: wrap;
+    }
+  }
+
+  .ai-section {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 2rem;
+
+    input {
+      scale: 1.5;
     }
   }
 </style>

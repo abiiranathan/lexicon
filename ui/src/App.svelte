@@ -18,6 +18,9 @@
   let currentTab = useLocalStorage("currentTab", "search");
   let searchQuery = useLocalStorage("search-query", "");
   let fileNameFilter = useLocalStorage("file-name-filter", "");
+  let aiEnabled = useLocalStorage("ai-enabled", true);
+
+  let useAI = $state(aiEnabled.value);
 
   let searchResults = $state<{ results: SearchResult[] }>({
     results: [],
@@ -95,7 +98,7 @@
 
     const start = performance.now();
     try {
-      const data = await searchAPI(query);
+      const data = await searchAPI(query, { aiEnabled: useAI });
 
       // Bounded cache avoid excessive memory consumption.
       if (searchCache.size < maxCacheSize) {
@@ -215,6 +218,14 @@
       clearTimeout(fileFilterTimeout);
     };
   });
+
+  $effect(() => {
+    if (useAI) {
+      aiEnabled.set(true);
+    } else {
+      aiEnabled.set(false);
+    }
+  });
 </script>
 
 <div class="container">
@@ -235,6 +246,7 @@
   <SearchSection
     {searchQuery}
     {currentTab}
+    bind:useAI
     onsubmit={handleSearchSubmit}
     onTabSwitch={switchTab}
   />
