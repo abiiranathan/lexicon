@@ -204,71 +204,78 @@ void pdf_search(PulsarCtx* ctx) {
 
     pgconn_t* db = get_pgconn(conn);
     char query_suffix[128];
-    snprintf(query_suffix, sizeof(query_suffix), "%s", query);
+    snprintf(query_suffix, sizeof(query_suffix), "%s:*", query);
 
     const char* params[2];
     int param_count          = 1;
     params[0]                = query_suffix;
     const char* search_query = NULL;
 
+    // Query when filtering by specific file
     if (fileId) {
         search_query =
             "WITH query AS ("
             "  SELECT websearch_to_tsquery('english', $1) as tsq"
             "), "
-            "RankedChunks AS ("
+            "RankedPages AS ("
             "  SELECT "
-            "    p.file_id, f.name, f.num_pages, p.page_num, p.text, "
+            "    p.file_id, p.page_num, "
             "    ts_rank(p.text_vector, query.tsq) as rank "
             "  FROM pages p "
             "  CROSS JOIN query "
-            "  JOIN files f ON p.file_id = f.id "
-            "  WHERE p.text_vector @@ query.tsq "
-            "    AND ts_rank(p.text_vector, query.tsq) >= 0.005 "
-            "    AND f.id = $2 "
+            "  WHERE p.text_vector @@ query.tsq AND p.file_id = $2 "
+            "  ORDER BY rank DESC "
+            "  LIMIT 100"
             "), "
             "UniquePages AS ("
             "  SELECT DISTINCT ON (file_id, page_num) "
-            "    file_id, name, num_pages, page_num, text, rank "
-            "  FROM RankedChunks "
+            "    file_id, page_num, rank "
+            "  FROM RankedPages "
             "  ORDER BY file_id, page_num, rank DESC"
             ") "
             "SELECT "
-            "  file_id, name, num_pages, page_num, "
-            "  LEFT(text, 500) as snippet, "
-            "  LEFT(text, 2000) as extended_snippet "
-            "FROM UniquePages "
-            "ORDER BY rank DESC, name, page_num "
+            "  u.file_id, f.name, f.num_pages, u.page_num, "
+            "  LEFT(p.text, 500) as snippet, "
+            "  LEFT(p.text, 2000) as extended_snippet, "
+            "  u.rank "
+            "FROM UniquePages u "
+            "JOIN files f ON u.file_id = f.id "
+            "JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num "
+            "ORDER BY u.rank DESC, f.name, u.page_num "
             "LIMIT 100";
         params[1]   = fileId;
         param_count = 2;
     } else {
+        // Query when searching across all files
         search_query =
             "WITH query AS ("
             "  SELECT websearch_to_tsquery('english', $1) as tsq"
             "), "
-            "RankedChunks AS ("
+            "RankedPages AS ("
             "  SELECT "
-            "    p.file_id, f.name, f.num_pages, p.page_num, p.text, "
+            "    p.file_id, p.page_num, "
             "    ts_rank(p.text_vector, query.tsq) as rank "
             "  FROM pages p "
             "  CROSS JOIN query "
-            "  JOIN files f ON p.file_id = f.id "
-            "  WHERE p.text_vector @@ query.tsq "
-            "    AND ts_rank(p.text_vector, query.tsq) >= 0.005 "
+            "  WHERE p.text_vector @@ query.tsq"
+            "  ORDER BY rank DESC "
+            "  LIMIT 100"
             "), "
             "UniquePages AS ("
             "  SELECT DISTINCT ON (file_id, page_num) "
-            "    file_id, name, num_pages, page_num, text, rank "
-            "  FROM RankedChunks "
+            "    file_id, page_num, rank "
+            "  FROM RankedPages "
             "  ORDER BY file_id, page_num, rank DESC"
             ") "
             "SELECT "
-            "  file_id, name, num_pages, page_num, "
-            "  LEFT(text, 500) as snippet, "
-            "  LEFT(text, 2000) as extended_snippet "
-            "FROM UniquePages "
-            "ORDER BY rank DESC, name, page_num "
+            "  u.file_id, f.name, f.num_pages, u.page_num, "
+            "  LEFT(p.text, 500) as snippet, "
+            "  LEFT(p.text, 2000) as extended_snippet, "
+            "  u.rank "
+            "FROM UniquePages u "
+            "JOIN files f ON u.file_id = f.id "
+            "JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num "
+            "ORDER BY u.rank DESC, f.name, u.page_num "
             "LIMIT 100";
     }
 
@@ -340,7 +347,7 @@ void pdf_search(PulsarCtx* ctx) {
 
     char* ai_summary    = NULL;
     const char* api_key = getenv("GEMINI_API_KEY");
-    if (api_key && ntuples > 0 && context_len > 0 && fileId == NULL) {
+    if (api_key && context_len > 0 && fileId == NULL) {
         TIME_BLOCK("GEMINI API CALL", { ai_summary = get_ai_summary(query, context, api_key); });
     }
 
