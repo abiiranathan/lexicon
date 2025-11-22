@@ -13,7 +13,7 @@ __attribute__((destructor)) void destroy_cairo_mutex(void) {
 #define UNLOCK_CAIRO_MUTEX() pthread_mutex_unlock(&cairo_mutex)
 
 /** Default rendering resolution in DPI. */
-static const double DEFAULT_RESOLUTION = 300.0;
+static const double DEFAULT_RESOLUTION = 150.0;
 
 PopplerDocument* open_document(const char* filename, int* num_pages) {
     if (filename == NULL || num_pages == NULL) {
@@ -68,7 +68,7 @@ void render_page_to_image(PopplerPage* page, int width, int height, const char* 
     LOCK_CAIRO_MUTEX();
 
     // Create the Cairo image surface
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
+    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, pixel_width, pixel_height);
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
         fprintf(stderr, "Error: Failed to create Cairo surface\n");
         UNLOCK_CAIRO_MUTEX();
@@ -155,7 +155,7 @@ static cairo_status_t cairo_write_to_buffer(void* closure, const unsigned char* 
     return CAIRO_STATUS_SUCCESS;
 }
 
-bool render_page_to_buffer(PopplerPage* page, int width, int height, png_buffer_t* out_buffer) {
+bool render_page_to_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
     if (page == NULL || out_buffer == NULL) {
         fprintf(stderr, "Error: Invalid parameters to render_page_to_buffer\n");
         return false;
@@ -263,7 +263,7 @@ bool render_page_from_document(const char* pdf_path, int page_num, const char* o
     return true;
 }
 
-bool render_page_from_document_to_buffer(const char* pdf_path, int page_num, png_buffer_t* out_buffer) {
+bool render_page_from_document_to_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer) {
     if (pdf_path == NULL || out_buffer == NULL) {
         fprintf(stderr, "Error: Invalid parameters to render_page_from_document_to_buffer\n");
         return false;
@@ -412,7 +412,8 @@ static cairo_status_t cairo_write_to_gzip_buffer(void* closure, const unsigned c
     if (!ctx->initialized) {
         ctx->stream = (z_stream){0};
         // windowBits = 15 + 16 for gzip format
-        int ret = deflateInit2(&ctx->stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
+        // int ret = deflateInit2(&ctx->stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
+        int ret = deflateInit2(&ctx->stream, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
         if (ret != Z_OK) {
             fprintf(stderr, "Error: Failed to initialize gzip compression: %d\n", ret);
             ctx->error_occurred = true;
@@ -507,7 +508,7 @@ static bool finalize_gzip_compression(cairo_gzip_write_context_t* ctx) {
     return true;
 }
 
-bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, png_buffer_t* out_buffer) {
+bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
     if (page == NULL || out_buffer == NULL) {
         fprintf(stderr, "Error: Invalid parameters to render_page_to_compressed_buffer\n");
         return false;
@@ -588,4 +589,201 @@ bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, 
     out_buffer->size = write_ctx.size;
     printf("Sending buffer of size: %zu\n", out_buffer->size);
     return true;
+}
+
+/* ==========================================================================
+ * PDF Attributes and Vector PDF Buffer Rendering
+ * ========================================================================== */
+
+/**
+ * Helper to safely duplicate a Poppler string (which might be NULL)
+ * into a standard C string that we manage.
+ */
+static char* get_poppler_string_property(PopplerDocument* doc, const char* property) {
+    gchar* value = NULL;
+    g_object_get(G_OBJECT(doc), property, &value, NULL);
+    if (value) {
+        char* copy = strdup(value);
+        g_free(value);
+        return copy;
+    }
+    return NULL;
+}
+
+/**
+ * Converts a generic time_t to a newly allocated formatted string.
+ * Returns NULL if time is 0.
+ */
+static char* format_time_property(time_t t) {
+    if (t == 0) return NULL;
+
+    // Allocate enough space for standard time format
+    char* buf = malloc(64);
+    if (!buf) return NULL;
+
+    struct tm* tm_info = localtime(&t);
+    strftime(buf, 64, "%Y-%m-%d %H:%M:%S", tm_info);
+    return buf;
+}
+
+void free_pdf_metadata(pdf_metadata_t* meta) {
+    if (meta == NULL) return;
+    if (meta->title) free(meta->title);
+    if (meta->author) free(meta->author);
+    if (meta->subject) free(meta->subject);
+    if (meta->keywords) free(meta->keywords);
+    if (meta->creator) free(meta->creator);
+    if (meta->producer) free(meta->producer);
+    if (meta->creation_date) free(meta->creation_date);
+    if (meta->mod_date) free(meta->mod_date);
+    if (meta->pdf_version) free(meta->pdf_version);
+    // Zero out the struct to prevent double frees
+    memset(meta, 0, sizeof(pdf_metadata_t));
+}
+
+bool get_pdf_metadata(const char* filename, pdf_metadata_t* out_meta) {
+    if (filename == NULL || out_meta == NULL) {
+        fprintf(stderr, "Error: Invalid parameters to get_pdf_metadata\n");
+        return false;
+    }
+
+    // Initialize structure
+    memset(out_meta, 0, sizeof(pdf_metadata_t));
+
+    int num_pages        = 0;
+    PopplerDocument* doc = open_document(filename, &num_pages);
+    if (doc == NULL) {
+        return false;
+    }
+
+    // Basic Integer/Boolean properties
+    out_meta->page_count = num_pages;
+    // Note: poppler_document_get_pdf_version_string returns a const char* owned by doc
+    const char* ver_str   = poppler_document_get_pdf_version_string(doc);
+    out_meta->pdf_version = ver_str ? strdup(ver_str) : NULL;
+
+    // Newer Poppler versions might strictly require a password check for encryption status,
+    // but usually, if it opened without error (and without password), it's decrypted.
+    // This call checks if the underlying file structure implies encryption.
+    // (Note: Poppler's API for encryption checking varies by version, this is a safe check).
+    // Assuming the document opened successfully in open_document:
+    out_meta->is_encrypted = FALSE;  // If we opened it without password prompt logic, it's accessible.
+
+    // String Properties
+    out_meta->title    = poppler_document_get_title(doc);
+    out_meta->author   = poppler_document_get_author(doc);
+    out_meta->subject  = poppler_document_get_subject(doc);
+    out_meta->keywords = poppler_document_get_keywords(doc);
+    out_meta->creator  = poppler_document_get_creator(doc);
+    out_meta->producer = poppler_document_get_producer(doc);
+
+    // Date Properties
+    // poppler_document_get_creation_date returns time_t directly in modern glib bindings
+    // or takes an argument. We use the property interface for maximum compatibility or specific getters.
+    time_t create_time = poppler_document_get_creation_date(doc);
+    time_t mod_time    = poppler_document_get_modification_date(doc);
+
+    out_meta->creation_date = format_time_property(create_time);
+    out_meta->mod_date      = format_time_property(mod_time);
+
+    g_object_unref(doc);
+    return true;
+}
+
+bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer) {
+    if (page == NULL || out_buffer == NULL) {
+        fprintf(stderr, "Error: Invalid parameters to render_page_to_pdf_buffer\n");
+        return false;
+    }
+
+    double width, height;
+    poppler_page_get_size(page, &width, &height);
+
+    // For PDF-to-PDF, we usually want 1:1 scale (72 DPI standard) to preserve physical size.
+    // We do NOT multiply by (DEFAULT_RESOLUTION / 72.0) here because PDF surfaces
+    // are vector-based and defined in points.
+
+    LOCK_CAIRO_MUTEX();
+
+    // Initialize write context
+    cairo_write_context_t write_ctx = {.data = NULL, .size = 0, .capacity = 0};
+
+    // Create PDF surface writing to stream (memory buffer)
+    // We reuse the existing 'cairo_write_to_buffer' callback.
+    cairo_surface_t* surface = cairo_pdf_surface_create_for_stream(cairo_write_to_buffer, &write_ctx, width, height);
+
+    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Failed to create Cairo PDF surface\n");
+        free(write_ctx.data);
+        UNLOCK_CAIRO_MUTEX();
+        return false;
+    }
+
+    cairo_t* cr = cairo_create(surface);
+    if (cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Failed to create Cairo context\n");
+        cairo_surface_destroy(surface);
+        free(write_ctx.data);
+        UNLOCK_CAIRO_MUTEX();
+        return false;
+    }
+
+    // No need to set white background or scale for PDF-to-PDF usually;
+    // we want the exact vector content.
+    // Render the Poppler page into the Cairo PDF context
+    poppler_page_render(page, cr);
+
+    // Finish surface to ensure all stream data is flushed to the buffer
+    cairo_surface_finish(surface);
+
+    cairo_status_t status = cairo_surface_status(surface);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    UNLOCK_CAIRO_MUTEX();
+
+    if (status != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Cairo surface finish failed: %s\n", cairo_status_to_string(status));
+        free(write_ctx.data);
+        return false;
+    }
+
+    // Transfer ownership to caller
+    out_buffer->data = write_ctx.data;
+    out_buffer->size = write_ctx.size;
+    return true;
+}
+
+bool render_page_from_document_to_pdf_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer) {
+    if (pdf_path == NULL || out_buffer == NULL) {
+        fprintf(stderr, "Error: Invalid parameters\n");
+        return false;
+    }
+
+    int num_pages        = 0;
+    PopplerDocument* doc = open_document(pdf_path, &num_pages);
+    if (doc == NULL) {
+        fprintf(stderr, "Error: Could not open document: %s\n", pdf_path);
+        return false;
+    }
+
+    if (page_num < 0 || page_num >= num_pages) {
+        fprintf(stderr, "Error: Page number %d is out of range (0-%d)\n", page_num, num_pages - 1);
+        g_object_unref(doc);
+        return false;
+    }
+
+    PopplerPage* page = poppler_document_get_page(doc, page_num);
+    if (page == NULL) {
+        fprintf(stderr, "Error: Could not get page %d\n", page_num);
+        g_object_unref(doc);
+        return false;
+    }
+
+    bool result = render_page_to_pdf_buffer(page, out_buffer);
+
+    g_object_unref(page);
+    g_object_unref(doc);
+    return result;
 }

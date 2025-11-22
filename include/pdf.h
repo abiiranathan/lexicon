@@ -47,15 +47,13 @@ bool poppler_page_to_pdf(PopplerPage* page, const char* output_pdf);
 void render_page_to_image(PopplerPage* page, int width, int height, const char* output_file);
 
 /**
- * Structure to hold in-memory PNG image data.
+ * Structure to hold in-memory PNG/PDF data.
  * Caller is responsible for freeing the data buffer.
  */
 typedef struct {
-    /** Raw PNG image data. Caller must free using free(). */
-    unsigned char* data;
-    /** Size of the image data in bytes. */
-    size_t size;
-} png_buffer_t;
+    unsigned char* data; /** Raw PNG/PDF data. Caller must free using free(). */
+    size_t size;         /** Size of the data in bytes. */
+} pdf_buffer_t;
 
 /**
  * Renders a PDF page to a PNG image in memory.
@@ -70,7 +68,7 @@ typedef struct {
  * @note Caller must free out_buffer->data using free() when done.
  * @note On failure, out_buffer is left unmodified.
  */
-bool render_page_to_buffer(PopplerPage* page, int width, int height, png_buffer_t* out_buffer);
+bool render_page_to_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer);
 
 /**
  * Renders a PDF page to a gzip-compressed PNG buffer.
@@ -82,7 +80,7 @@ bool render_page_to_buffer(PopplerPage* page, int width, int height, png_buffer_
  * @return true on success, false on failure.
  * @note Caller must free out_buffer->data using free() when done.
  */
-bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, png_buffer_t* out_buffer);
+bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer);
 
 /**
  * Renders a single page from a PDF document to a PNG file.
@@ -111,7 +109,7 @@ bool render_page_from_document(const char* pdf_path, int page_num, const char* o
  * @note Automatically determines page dimensions and renders at 300 DPI.
  * @note Caller must free out_buffer->data using free() when done.
  */
-bool render_page_from_document_to_buffer(const char* pdf_path, int page_num, png_buffer_t* out_buffer);
+bool render_page_from_document_to_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer);
 
 /**
  * Renders a single page from a PDF document to a PDF file.
@@ -126,5 +124,31 @@ bool render_page_from_document_to_buffer(const char* pdf_path, int page_num, png
  * @note Output PDF is rendered at 300 DPI resolution.
  */
 bool render_page_to_pdf(const char* pdf_path, int page_num, const char* output_pdf);
+
+typedef struct {
+    char* title;
+    char* author;
+    char* subject;
+    char* keywords;
+    char* creator;
+    char* producer;
+    char* creation_date;  // String format
+    char* mod_date;       // String format
+    int page_count;
+    bool is_encrypted;
+    char* pdf_version;
+} pdf_metadata_t;
+
+// Helper to free the metadata structure
+void free_pdf_metadata(pdf_metadata_t* meta);
+
+// Get attributes/metadata from the PDF
+bool get_pdf_metadata(const char* filename, pdf_metadata_t* out_meta);
+
+// Render a specific page to a memory buffer containing a PDF file (Vector)
+bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer);
+
+// Wrapper to open file, render page to PDF buffer, and close
+bool render_page_from_document_to_pdf_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer);
 
 #endif /* __PDF_H__ */

@@ -81,7 +81,7 @@ static char* _build_gemini_prompt(const char* query, const char* context, size_t
              "2. For specific questions (dosing, definitions, procedures):\n"
              "   - Lead with the DIRECT ANSWER in the first sentence or paragraph\n"
              "   - Make the key information prominent and easy to find\n"
-             "   - Only add supporting details AFTER the main answer\n"
+             "   - Add supporting details AFTER the main answer\n"
              "3. For broad questions (\"tell me about X\", \"explain Y\"):\n"
              "   - Provide comprehensive coverage\n"
              "   - Include multiple aspects and details\n"
@@ -107,8 +107,8 @@ static char* _build_gemini_prompt(const char* query, const char* context, size_t
              "- For specific questions, use <p> tags with <b> for key information\n"
              "- For broader topics, you may use <h3> for sections\n\n"
              "RESPONSE LENGTH:\n"
-             "- Specific questions: 3-8 sentences focused on the answer\n"
-             "- Broad questions: 10-20 sentences with comprehensive coverage\n"
+             "- Specific questions: 10-20 sentences focused on the answer\n"
+             "- Broad questions: 50-100 sentences with comprehensive coverage\n"
              "- Medical treatment protocols: Complete but prioritize the core regimen first\n\n"
              "Your response must be pure HTML that directly answers the user's question.",
              query, context);

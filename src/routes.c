@@ -64,12 +64,13 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
         send_json_error(conn, "Invalid file ID: must be a valid integer");
         return;
     }
+
     if (str_to_i64(page_num_str, &page_num_ll) != STO_SUCCESS) {
         send_json_error(conn, "Invalid page number: must be a valid integer");
         return;
     }
 
-    char cache_key[CACHE_KEY_MAX_LEN];
+    char cache_key[CACHE_KEY_MAX_LEN] = {};
     cache_make_key(cache_key, sizeof(cache_key), file_id, (int)page_num_ll);
 
     char* cached_json = NULL;
@@ -116,6 +117,17 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
 
     const char* file_id_str  = get_path_param(conn, "file_id");
     const char* page_num_str = get_path_param(conn, "page_num");
+    const char* type         = query_get(conn, "type");
+
+    if (type == NULL) {
+        type = "png";
+    }
+
+    // Must be png or PDF.
+    if (!(strcmp(type, "png") == 0 || strcmp(type, "pdf") == 0)) {
+        send_json_error(conn, "type query parameter must be either 'png' or 'pdf'");
+        return;
+    }
 
     int64_t file_id;
     int page_num;
@@ -129,16 +141,22 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
         return;
     }
 
-    char cache_key[CACHE_KEY_MAX_LEN];
-    snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d", (long long)file_id, page_num);
+    char cache_key[CACHE_KEY_MAX_LEN] = {};
+    snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d:type:%s", (long long)file_id, page_num, type);
 
-    char* png_data  = NULL;
-    size_t png_size = 0;
-    if (cache_get(g_response_cache, cache_key, &png_data, &png_size)) {
-        static const char headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
-        conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
-        conn_write(conn, png_data, png_size);
-        free(png_data);
+    static const char png_headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
+    static const char pdf_headers[] = "Content-Type: application/pdf\r\nCache-Control: public, max-age=3600\r\n";
+    char* bytes                     = NULL;
+    size_t length                   = 0;
+
+    if (cache_get(g_response_cache, cache_key, &bytes, &length)) {
+        if (strcmp(type, "png") == 0) {
+            conn_writeheader_raw(conn, png_headers, sizeof(png_headers) - 1);
+        } else {
+            conn_writeheader_raw(conn, pdf_headers, sizeof(pdf_headers) - 1);
+        }
+        conn_write(conn, bytes, length);
+        free(bytes);
         return;
     }
 
@@ -166,16 +184,23 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
         return;
     }
 
-    png_buffer_t png_buffer = {0};
-    if (render_page_from_document_to_buffer(path, page_num - 1, &png_buffer)) {
-        static const char headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
-        conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
-        conn_write(conn, png_buffer.data, png_buffer.size);
+    pdf_buffer_t byte_buf                                                            = {0};
+    bool (*renderFunc)(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer) = NULL;
 
-        cache_set(g_response_cache, cache_key, png_buffer.data, png_buffer.size, 60);
+    if (strcmp(type, "png") == 0) {
+        conn_writeheader_raw(conn, png_headers, sizeof(png_headers) - 1);
+        renderFunc = render_page_from_document_to_buffer;
+    } else {
+        conn_writeheader_raw(conn, pdf_headers, sizeof(pdf_headers) - 1);
+        renderFunc = render_page_from_document_to_pdf_buffer;
+    }
+
+    if (renderFunc(path, page_num - 1, &byte_buf)) {
+        conn_write(conn, byte_buf.data, byte_buf.size);
+        cache_set(g_response_cache, cache_key, byte_buf.data, byte_buf.size, 60);
     } else {
         conn_set_status(conn, StatusInternalServerError);
-        send_json_error(conn, "Error writing PNG image");
+        send_json_error(conn, "Error writing data");
         return;
     }
 }
@@ -187,15 +212,16 @@ void pdf_search(PulsarCtx* ctx) {
     const char* fileId     = query_get(conn, "file_id");
     const char* query      = query_get(conn, "q");
     const char* ai_enabled = query_get(conn, "ai_enabled");
-    const bool use_ai      = ai_enabled && strcmp(ai_enabled, "true") == 0;
+    const bool use_ai      = !(ai_enabled && strcmp(ai_enabled, "false") == 0);
 
     if (!query || query[0] == '\0') {
         send_json_error(conn, "Missing search query");
         return;
     }
 
-    char cache_key[CACHE_KEY_MAX_LEN];
-    snprintf(cache_key, sizeof(cache_key), "search:%s", query);
+    // Cache key generation remains the same
+    char cache_key[CACHE_KEY_MAX_LEN] = {};
+    snprintf(cache_key, sizeof(cache_key), "search:%s:%s", query, fileId ? fileId : "all");
 
     char* cached_json = NULL;
     size_t cached_len = 0;
@@ -206,84 +232,80 @@ void pdf_search(PulsarCtx* ctx) {
     }
 
     pgconn_t* db = get_pgconn(conn);
-    char query_suffix[128];
-    snprintf(query_suffix, sizeof(query_suffix), "%s:*", query);
 
     const char* params[2];
-    int param_count          = 1;
-    params[0]                = query_suffix;
-    const char* search_query = NULL;
+    int param_count = 1;
+    params[0]       = query;
 
-    // Query when filtering by specific file
+    const char* common_cte =
+        "WITH input_queries AS ("
+        "  SELECT "
+        "    websearch_to_tsquery('english', $1) as broad_query, "
+        "    phraseto_tsquery('english', $1) as phrase_query "
+        "), "
+        "RankedPages AS ("
+        "  SELECT "
+        "    p.file_id, p.page_num, "
+        "    ( "
+        "      ts_rank_cd(p.text_vector, inputs.broad_query) "
+        "      + "
+        "      (CASE WHEN p.text_vector @@ inputs.phrase_query THEN 10.0 ELSE 0.0 END) "
+        "    ) as rank "
+        "  FROM pages p "
+        "  CROSS JOIN input_queries inputs "
+        "  WHERE p.text_vector @@ inputs.broad_query ";
+
+    // Combining strings for specific file vs all files
+    char full_query[4096];
+
     if (fileId) {
-        search_query =
-            "WITH query AS ("
-            "  SELECT websearch_to_tsquery('english', $1) as tsq"
-            "), "
-            "RankedPages AS ("
-            "  SELECT "
-            "    p.file_id, p.page_num, "
-            "    ts_rank(p.text_vector, query.tsq) as rank "
-            "  FROM pages p "
-            "  CROSS JOIN query "
-            "  WHERE p.text_vector @@ query.tsq AND p.file_id = $2 "
-            "  ORDER BY rank DESC "
-            "  LIMIT 100"
-            "), "
-            "UniquePages AS ("
-            "  SELECT DISTINCT ON (file_id, page_num) "
-            "    file_id, page_num, rank "
-            "  FROM RankedPages "
-            "  ORDER BY file_id, page_num, rank DESC"
-            ") "
-            "SELECT "
-            "  u.file_id, f.name, f.num_pages, u.page_num, "
-            "  LEFT(p.text, 500) as snippet, "
-            "  LEFT(p.text, 2000) as extended_snippet, "
-            "  u.rank "
-            "FROM UniquePages u "
-            "JOIN files f ON u.file_id = f.id "
-            "JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num "
-            "ORDER BY u.rank DESC, f.name, u.page_num "
-            "LIMIT 100";
         params[1]   = fileId;
         param_count = 2;
+        snprintf(full_query, sizeof(full_query),
+                 "%s AND p.file_id = $2 "
+                 "  ORDER BY rank DESC LIMIT 100 "
+                 "), "
+                 "UniquePages AS ("
+                 "  SELECT DISTINCT ON (file_id, page_num) file_id, page_num, rank "
+                 "  FROM RankedPages ORDER BY file_id, page_num, rank DESC "
+                 ") "
+                 "SELECT "
+                 "  u.file_id, f.name, f.num_pages, u.page_num, "
+                 "  ts_headline('english', p.text, inputs.broad_query, "
+                 "    'StartSel=<b>, StopSel=</b>, MaxWords=200, MinWords=20') as snippet, "
+                 "  LEFT(p.text, 2000) as extended_snippet, "
+                 "  u.rank "
+                 "FROM UniquePages u "
+                 "CROSS JOIN input_queries inputs "  // Need inputs again for ts_headline
+                 "JOIN files f ON u.file_id = f.id "
+                 "JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num "
+                 "ORDER BY u.rank DESC, f.name, u.page_num LIMIT 100",
+                 common_cte);
     } else {
-        // Query when searching across all files
-        search_query =
-            "WITH query AS ("
-            "  SELECT websearch_to_tsquery('english', $1) as tsq"
-            "), "
-            "RankedPages AS ("
-            "  SELECT "
-            "    p.file_id, p.page_num, "
-            "    ts_rank(p.text_vector, query.tsq) as rank "
-            "  FROM pages p "
-            "  CROSS JOIN query "
-            "  WHERE p.text_vector @@ query.tsq"
-            "  ORDER BY rank DESC "
-            "  LIMIT 100"
-            "), "
-            "UniquePages AS ("
-            "  SELECT DISTINCT ON (file_id, page_num) "
-            "    file_id, page_num, rank "
-            "  FROM RankedPages "
-            "  ORDER BY file_id, page_num, rank DESC"
-            ") "
-            "SELECT "
-            "  u.file_id, f.name, f.num_pages, u.page_num, "
-            "  LEFT(p.text, 500) as snippet, "
-            "  LEFT(p.text, 2000) as extended_snippet, "
-            "  u.rank "
-            "FROM UniquePages u "
-            "JOIN files f ON u.file_id = f.id "
-            "JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num "
-            "ORDER BY u.rank DESC, f.name, u.page_num "
-            "LIMIT 100";
+        snprintf(full_query, sizeof(full_query),
+                 "%s "
+                 "  ORDER BY rank DESC LIMIT 100 "
+                 "), "
+                 "UniquePages AS ("
+                 "  SELECT DISTINCT ON (file_id, page_num) file_id, page_num, rank "
+                 "  FROM RankedPages ORDER BY file_id, page_num, rank DESC "
+                 ") "
+                 "SELECT "
+                 "  u.file_id, f.name, f.num_pages, u.page_num, "
+                 "  ts_headline('english', p.text, inputs.broad_query, "
+                 "    'StartSel=<b>, StopSel=</b>, MaxWords=200, MinWords=20') as snippet, "
+                 "  LEFT(p.text, 2000) as extended_snippet, "
+                 "  u.rank "
+                 "FROM UniquePages u "
+                 "CROSS JOIN input_queries inputs "
+                 "JOIN files f ON u.file_id = f.id "
+                 "JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num "
+                 "ORDER BY u.rank DESC, f.name, u.page_num LIMIT 100",
+                 common_cte);
     }
 
     PGresult* res = NULL;
-    TIME_BLOCK("pdfsearch", { res = pgconn_query_params(db, search_query, param_count, params, NULL); });
+    TIME_BLOCK("pdfsearch", { res = pgconn_query_params(db, full_query, param_count, params, NULL); });
 
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
@@ -388,7 +410,7 @@ void list_files(PulsarCtx* ctx) {
     if (page_size < 1) page_size = 25;
     if (page_size > 100) page_size = 100;
 
-    char cache_key[CACHE_KEY_MAX_LEN];
+    char cache_key[CACHE_KEY_MAX_LEN] = {};
     if (name && name[0] != '\0') {
         snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d:n%s", page, page_size, name);
     } else {
@@ -473,7 +495,7 @@ void get_file_by_id(PulsarCtx* ctx) {
         return;
     }
 
-    char cache_key[CACHE_KEY_MAX_LEN];
+    char cache_key[CACHE_KEY_MAX_LEN] = {};
     cache_make_key(cache_key, sizeof(cache_key), file_id, -1);
 
     char* cached_json = NULL;
