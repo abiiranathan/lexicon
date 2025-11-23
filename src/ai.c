@@ -282,20 +282,29 @@ static char* _parse_gemini_response(const char* response_data, size_t response_s
  * @param query The search query
  * @param context The context from search results (extended snippets)
  * @param api_key The Gemini API key
+ * @param is_cached Bool pointer that will be set to true if returned poiinter
+ * if of a cached response. In this case, you MUST call deref_ai_response() to
+ * decrement the ref count in the underlying cache.
  * @return Allocated string with AI summary (caller must free), or NULL on error
  */
-char* get_ai_summary(const char* query, const char* context, const char* api_key) {
-    if (!query || !context || !api_key) {
+char* get_ai_summary(const char* query, const char* context, const char* api_key, bool* is_cached) {
+    if (!query || !context || !api_key || !is_cached) {
         LOG_ERROR("Invalid arguments");
         return NULL;
     }
 
+    // By default, no cache
+    *is_cached = false;
+
     // Check the cache first
-    char* gemini_resp = NULL;
+    const char* gemini_resp = NULL;
+
     if (ai_response_cache) {
         size_t outlen = 0;
-        if (cache_get(ai_response_cache, query, &gemini_resp, &outlen)) {
-            return gemini_resp;
+        gemini_resp   = cache_get(ai_response_cache, query, &outlen);
+        if (gemini_resp) {
+            *is_cached = true;
+            return (char*)gemini_resp;
         }
     }
 
@@ -343,12 +352,18 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
     // Parse response
     gemini_resp = _parse_gemini_response(response.data, response.size);
 
-    // Cache the response
+    // Cache the response for 1 hour
     if (gemini_resp && ai_response_cache) {
-        if (!cache_set(ai_response_cache, query, (uint8_t*)gemini_resp, strlen(gemini_resp), 0)) {
+        if (!cache_set(ai_response_cache, query, (uint8_t*)gemini_resp, strlen(gemini_resp), 3600)) {
             LOG_ERROR("Caching AI response failed");
         }
     }
 
-    return gemini_resp;
+    return (char*)gemini_resp;
+}
+
+// Release response pointer back to the cache.
+void deref_ai_response(char* response) {
+    if (!response) return;
+    cache_release(response);
 }

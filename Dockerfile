@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     pkg-config \
     libpq-dev \
+    libcurl4-openssl-dev \
     libxxhash-dev \
     libpoppler-glib-dev \
     libglib2.0-dev \
@@ -94,6 +95,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libcairo2 \
     zlib1g \
+    libcurl4-openssl-dev \
     ca-certificates \
     wget \
     && rm -rf /var/lib/apt/lists/*

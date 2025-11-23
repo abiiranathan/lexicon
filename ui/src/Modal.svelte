@@ -1,6 +1,5 @@
 <script lang="ts">
   import { searchAPI } from "./lib/httpclient";
-  import SearchResults from "./SearchResults.svelte";
 
   type ModalProps = {
     isOpen: boolean;
@@ -37,6 +36,7 @@
   let lastTouchDistance = $state(0);
   let dragStartX = $state(0);
   let dragStartY = $state(0);
+  let rotation = $state(0); // 0, 90, 180, 270
 
   let searchResults = $state<{ results: SearchResult[] }>({
     results: [],
@@ -83,6 +83,7 @@
     scale = 1;
     translateX = 0;
     translateY = 0;
+    rotation = 0;
     imageLoaded = false;
     loadedImage = null;
 
@@ -114,6 +115,7 @@
     void translateX;
     void translateY;
     void viewMode;
+    void rotation;
 
     renderCanvas();
   });
@@ -130,49 +132,70 @@
     const container = containerElement;
     const dpr = window.devicePixelRatio || 1;
 
-    if (viewMode === "scroll") {
-      // Scroll mode: render at full width, natural height
-      const containerWidth = container.clientWidth;
-      const imgAspect = img.width / img.height;
+    // Determine if rotation is 90 or 270 (landscape orientation)
+    const isRotatedLandscape = rotation === 90 || rotation === 270;
 
-      // Set minimum width to ensure readability.
-      const minDisplayWidth = 600; // Adjust this value based on your content
+    if (viewMode === "scroll") {
+      const containerWidth = container.clientWidth;
+      const minDisplayWidth = 600;
+
+      // Swap width/height calculations if rotated 90 or 270
+      const imgWidth = isRotatedLandscape ? img.height : img.width;
+      const imgHeight = isRotatedLandscape ? img.width : img.height;
+      const imgAspect = imgWidth / imgHeight;
+
       const displayWidth = Math.max(containerWidth, minDisplayWidth);
       const displayHeight = displayWidth / imgAspect;
 
-      // Set canvas size with device pixel ratio for crisp rendering
       canvas.width = displayWidth * dpr;
       canvas.height = displayHeight * dpr;
-
-      // Set display size
       canvas.style.width = `${displayWidth}px`;
       canvas.style.height = `${displayHeight}px`;
 
-      // Scale context for high DPI
       ctx.scale(dpr, dpr);
-
-      // Clear and draw
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, displayWidth, displayHeight);
-      ctx.drawImage(img, 0, 0, displayWidth, displayHeight);
+
+      // Apply rotation transform
+      ctx.save();
+      ctx.translate(displayWidth / 2, displayHeight / 2);
+      ctx.rotate((rotation * Math.PI) / 180);
+
+      // Draw centered on the rotated canvas
+      if (isRotatedLandscape) {
+        ctx.drawImage(
+          img,
+          -displayHeight / 2,
+          -displayWidth / 2,
+          displayHeight,
+          displayWidth
+        );
+      } else {
+        ctx.drawImage(
+          img,
+          -displayWidth / 2,
+          -displayHeight / 2,
+          displayWidth,
+          displayHeight
+        );
+      }
+      ctx.restore();
     } else {
-      // Fit mode: zoom/pan behavior
+      // Fit mode with rotation
       const canvasWidth = container.clientWidth;
       const canvasHeight = container.clientHeight;
 
-      // Set canvas size with device pixel ratio
       canvas.width = canvasWidth * dpr;
       canvas.height = canvasHeight * dpr;
-
-      // Set display size
       canvas.style.width = `${canvasWidth}px`;
       canvas.style.height = `${canvasHeight}px`;
 
-      // Scale context for high DPI
       ctx.scale(dpr, dpr);
 
-      // Calculate scaled dimensions to fit image in canvas
-      const imgAspect = img.width / img.height;
+      // Swap dimensions if rotated 90 or 270
+      const imgWidth = isRotatedLandscape ? img.height : img.width;
+      const imgHeight = isRotatedLandscape ? img.width : img.height;
+      const imgAspect = imgWidth / imgHeight;
       const canvasAspect = canvasWidth / canvasHeight;
 
       let drawWidth, drawHeight;
@@ -184,22 +207,41 @@
         drawWidth = canvasHeight * imgAspect;
       }
 
-      // Center the image
       const baseX = (canvasWidth - drawWidth) / 2;
       const baseY = (canvasHeight - drawHeight) / 2;
 
-      // Clear canvas
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-      // Apply transform
       ctx.save();
+      // Apply zoom and pan first
       ctx.translate(canvasWidth / 2, canvasHeight / 2);
       ctx.scale(scale, scale);
       ctx.translate(-canvasWidth / 2, -canvasHeight / 2);
       ctx.translate(translateX, translateY);
 
-      ctx.drawImage(img, baseX, baseY, drawWidth, drawHeight);
+      // Then apply rotation around the image center
+      ctx.translate(baseX + drawWidth / 2, baseY + drawHeight / 2);
+      ctx.rotate((rotation * Math.PI) / 180);
+
+      // Draw centered on rotation point
+      if (isRotatedLandscape) {
+        ctx.drawImage(
+          img,
+          -drawHeight / 2,
+          -drawWidth / 2,
+          drawHeight,
+          drawWidth
+        );
+      } else {
+        ctx.drawImage(
+          img,
+          -drawWidth / 2,
+          -drawHeight / 2,
+          drawWidth,
+          drawHeight
+        );
+      }
       ctx.restore();
     }
   }
@@ -320,6 +362,10 @@
     }
   }
 
+  function rotateImage() {
+    rotation = (rotation + 90) % 360;
+  }
+
   // Handle keyboard shortcuts at document level
   $effect(() => {
     if (!isOpen) return;
@@ -349,9 +395,12 @@
       } else if (e.key === "g" && !showPageInput) {
         e.preventDefault();
         togglePageInput();
-      } else if (e.key === "r") {
+      } else if (e.key === "r" && !e.shiftKey) {
         e.preventDefault();
         resetTransform();
+      } else if (e.key === "R" || (e.key === "r" && e.shiftKey)) {
+        e.preventDefault();
+        rotateImage();
       } else if (e.key === "v") {
         e.preventDefault();
         toggleViewMode();
@@ -442,7 +491,10 @@
     searchError = null;
 
     try {
-      const data = await searchAPI(query, { fileId: modalContent.file_id });
+      const data = await searchAPI(query, {
+        fileId: modalContent.file_id,
+        aiEnabled: false, // No AI auto-complete for in-book searches.
+      });
       searchResults = data;
     } catch (error: unknown) {
       searchError = (error as Error).message;
@@ -565,6 +617,27 @@
           {/if}
 
           {#if imageLoaded}
+            <button
+              class="nav-button"
+              onclick={rotateImage}
+              aria-label="Rotate image 90 degrees"
+              title="Rotate (Shift+R)"
+            >
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"
+                ></path>
+                <path d="M21 3v5h-5"></path>
+              </svg>
+            </button>
             <button
               class="nav-button view-mode-toggle"
               onclick={toggleViewMode}

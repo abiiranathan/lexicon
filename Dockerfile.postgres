@@ -1,0 +1,27 @@
+# Use the SAME base as the final image to ensure binary compatibility
+FROM postgres:18-alpine AS rum-source
+
+# Install build dependencies for Alpine
+RUN apk add --no-cache \
+    git \
+    make \
+    build-base \
+    clang19 \
+    llvm19
+
+# Build RUM
+WORKDIR /tmp
+RUN git clone --depth 1 https://github.com/postgrespro/rum.git && \
+    cd rum && \
+    # Alpine's Postgres image has pg_config in the path usually, 
+    # or we rely on the environment variables set by the base image.
+    make USE_PGXS=1 && \
+    make USE_PGXS=1 install
+
+# --- Final Stage ---
+FROM postgres:18-alpine
+
+# Copy compiled RUM extension
+COPY --from=rum-source /usr/local/lib/postgresql/rum.so /usr/local/lib/postgresql/
+COPY --from=rum-source /usr/local/share/postgresql/extension/rum.control /usr/local/share/postgresql/extension/
+COPY --from=rum-source /usr/local/share/postgresql/extension/rum--*.sql /usr/local/share/postgresql/extension/

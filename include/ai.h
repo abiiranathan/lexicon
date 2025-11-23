@@ -10,13 +10,16 @@ extern "C" {
 
 /**
  * Calls Gemini API to generate AI summary for search results.
- * Enhanced with better prompting to allow Gemini to provide comprehensive answers.
+ * Optimized for direct, concise answers that prioritize the actual question.
  * @param query The search query
- * @param context The context from search results (complete page content)
+ * @param context The context from search results (extended snippets)
  * @param api_key The Gemini API key
+ * @param is_cached Bool pointer that will be set to true if returned poiinter
+ * if of a cached response. In this case, you MUST call deref_ai_response() to
+ * decrement the ref count in the underlying cache.
  * @return Allocated string with AI summary (caller must free), or NULL on error
  */
-char* ai_get_answer(const char* query, const char* context, const char* api_key);
+char* get_ai_summary(const char* query, const char* context, const char* api_key, bool* is_cached);
 
 /**
  * Initializes the AI cache.
@@ -26,6 +29,9 @@ char* ai_get_answer(const char* query, const char* context, const char* api_key)
  * @return true on success, false on failure.
  */
 bool init_ai_cache(size_t capacity, uint32_t ttl_seconds);
+
+// Release response pointer back to the cache.
+void deref_ai_response(char* response);
 
 /**
  * Destroys the global response cache.

@@ -53,3 +53,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_compile_options(${PROJECT_NAME} PRIVATE
     ${POPPLER_GLIB_CFLAGS_OTHER}
 )
+
+# Enable LTO for Release builds
+if(CMAKE_BUILD_TYPE MATCHES "Release")
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(-flto)
+        add_link_options(-flto)
+    endif()
+endif()

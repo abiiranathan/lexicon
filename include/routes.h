@@ -25,17 +25,6 @@ bool init_response_cache(size_t capacity, uint32_t ttl_seconds);
 void destroy_response_cache(void);
 
 /**
- * Calls Gemini API to generate AI summary for search results.
- * Enhanced with better prompting to allow Gemini to provide comprehensive answers.
- * Set GEMINI_MODEL environment variable to customize the model.
- * @param query The search query
- * @param context The context from search results (complete page content)
- * @param api_key The Gemini API key
- * @return Allocated string with AI summary (caller must free), or NULL on error
- */
-char* get_ai_summary(const char* query, const char* context, const char* api_key);
-
-/**
  * Returns full text for a given file_id and page_num.
  * Path: /api/file/{file_id}/page/{page_num}
  */

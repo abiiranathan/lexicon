@@ -21,7 +21,7 @@ A high-performance full-text search service for PDF documents with web-based UI.
   - `poppler-glib` (PDF rendering, depending on `pdf.h` implementation)
   - `yyjson` (JSON serialization)
   - Custom libraries: `pgconn`, `pulsar`, `solidc` under https://github.com/abiiranathan
-
+  
 ## Building
 
 ```bash
@@ -36,6 +36,11 @@ make
 ```bash
 # Create a PostgreSQL database
 createdb -U postgres pdfsearch
+
+# Install the postgres RUM extension(https://github.com/postgrespro/rum) for faster FTS indexes.
+
+# Edit script if you use a different database name.
+./scripts/install_rum.sh 
 ```
 
 ## Usage
