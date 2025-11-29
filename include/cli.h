@@ -3,7 +3,7 @@
 
 #include <pgconn/pgconn.h>
 #include <solidc/filepath.h>
-#include <solidc/flag.h>
+#include <solidc/flags.h>
 
 #ifdef __cplusplus
 extern "C" {

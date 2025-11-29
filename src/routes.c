@@ -75,7 +75,8 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
     char cache_key[CACHE_KEY_MAX_LEN] = {};
     cache_make_key(cache_key, sizeof(cache_key), file_id, (int)page_num_ll);
     size_t cached_len       = 0;
-    const char* cached_json = cache_get(g_response_cache, cache_key, &cached_len);
+    size_t key_len          = strlen(cache_key);
+    const char* cached_json = cache_get(g_response_cache, cache_key, key_len, &cached_len);
     if (cached_json) {
         send_cache_json(conn, cached_json, cached_len);
         cache_release(cached_json);  // release zero-copy reference
@@ -108,7 +109,7 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
         return;
     }
 
-    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, strlen(json_str), 0);
+    cache_set(g_response_cache, cache_key, key_len, (unsigned char*)json_str, strlen(json_str), 0);
     conn_send_json(conn, StatusOK, json_str);
     free(json_str);
 }
@@ -148,8 +149,9 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     static const char png_headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
     static const char pdf_headers[] = "Content-Type: application/pdf\r\nCache-Control: public, max-age=3600\r\n";
     size_t length                   = 0;
+    size_t key_len                  = strlen(cache_key);
 
-    const char* bytes = cache_get(g_response_cache, cache_key, &length);
+    const char* bytes = cache_get(g_response_cache, cache_key, key_len, &length);
     if (bytes) {
         if (strcmp(type, "png") == 0) {
             conn_writeheader_raw(conn, png_headers, sizeof(png_headers) - 1);
@@ -198,7 +200,7 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
 
     if (renderFunc(path, page_num - 1, &byte_buf)) {
         conn_write(conn, byte_buf.data, byte_buf.size);
-        cache_set(g_response_cache, cache_key, byte_buf.data, byte_buf.size, 60);
+        cache_set(g_response_cache, cache_key, key_len, byte_buf.data, byte_buf.size, 60);
     } else {
         conn_set_status(conn, StatusInternalServerError);
         send_json_error(conn, "Error writing data");
@@ -223,9 +225,10 @@ void pdf_search(PulsarCtx* ctx) {
     // Cache key generation remains the same
     char cache_key[CACHE_KEY_MAX_LEN] = {};
     snprintf(cache_key, sizeof(cache_key), "search:%s:%s", query, fileId ? fileId : "all");
+    size_t key_len = strlen(cache_key);
 
     size_t cached_len       = 0;
-    const char* cached_json = cache_get(g_response_cache, cache_key, &cached_len);
+    const char* cached_json = cache_get(g_response_cache, cache_key, key_len, &cached_len);
     if (cached_json) {
         send_cache_json(conn, cached_json, cached_len);
         cache_release(cached_json);
@@ -399,7 +402,7 @@ void pdf_search(PulsarCtx* ctx) {
         return;
     }
 
-    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, jsonlen, 60);
+    cache_set(g_response_cache, cache_key, key_len, (unsigned char*)json_str, jsonlen, 60);
     conn_send_json(conn, StatusOK, json_str);
     free(json_str);
 }
@@ -428,7 +431,8 @@ void list_files(PulsarCtx* ctx) {
     }
 
     size_t cached_len       = 0;
-    const char* cached_json = cache_get(g_response_cache, cache_key, &cached_len);
+    size_t key_len          = strlen(cache_key);
+    const char* cached_json = cache_get(g_response_cache, cache_key, key_len, &cached_len);
     if (cached_json) {
         send_cache_json(conn, cached_json, cached_len);
         cache_release(cached_json);
@@ -489,7 +493,7 @@ void list_files(PulsarCtx* ctx) {
         return;
     }
 
-    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, jsonlen, 0);
+    cache_set(g_response_cache, cache_key, key_len, (unsigned char*)json_str, jsonlen, 0);
     conn_send_json(conn, StatusOK, json_str);
     free(json_str);
 }
@@ -509,7 +513,8 @@ void get_file_by_id(PulsarCtx* ctx) {
     cache_make_key(cache_key, sizeof(cache_key), file_id, -1);
 
     size_t cached_len       = 0;
-    const char* cached_json = cache_get(g_response_cache, cache_key, &cached_len);
+    size_t key_len          = strlen(cache_key);
+    const char* cached_json = cache_get(g_response_cache, cache_key, key_len, &cached_len);
     if (cached_json) {
         send_cache_json(conn, cached_json, cached_len);
         cache_release(cached_json);
@@ -546,7 +551,7 @@ void get_file_by_id(PulsarCtx* ctx) {
         return;
     }
 
-    cache_set(g_response_cache, cache_key, (unsigned char*)json_str, length, 0);
+    cache_set(g_response_cache, cache_key, key_len, (unsigned char*)json_str, length, 0);
     conn_send_json(conn, StatusOK, json_str);
     free(json_str);
 }

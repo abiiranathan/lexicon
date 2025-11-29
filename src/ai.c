@@ -298,10 +298,11 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
 
     // Check the cache first
     const char* gemini_resp = NULL;
+    size_t query_len        = strlen(query);
 
     if (ai_response_cache) {
         size_t outlen = 0;
-        gemini_resp   = cache_get(ai_response_cache, query, &outlen);
+        gemini_resp   = cache_get(ai_response_cache, query, query_len, &outlen);
         if (gemini_resp) {
             *is_cached = true;
             return (char*)gemini_resp;
@@ -354,7 +355,7 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
 
     // Cache the response for 1 hour
     if (gemini_resp && ai_response_cache) {
-        if (!cache_set(ai_response_cache, query, (uint8_t*)gemini_resp, strlen(gemini_resp), 3600)) {
+        if (!cache_set(ai_response_cache, query, query_len, (uint8_t*)gemini_resp, strlen(gemini_resp), 3600)) {
             LOG_ERROR("Caching AI response failed");
         }
     }
