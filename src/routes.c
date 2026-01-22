@@ -54,8 +54,8 @@ static inline int cache_make_key(char* buffer, size_t buffer_size, int64_t file_
 }
 
 void get_page_by_file_and_page(PulsarCtx* ctx) {
-    PulsarConn* conn         = ctx->conn;
-    const char* file_id_str  = get_path_param(conn, "file_id");
+    PulsarConn* conn = ctx->conn;
+    const char* file_id_str = get_path_param(conn, "file_id");
     const char* page_num_str = get_path_param(conn, "page_num");
 
     ASSERT(g_response_cache);
@@ -74,8 +74,8 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
 
     char cache_key[CACHE_KEY_MAX_LEN] = {};
     cache_make_key(cache_key, sizeof(cache_key), file_id, (int)page_num_ll);
-    size_t cached_len       = 0;
-    size_t key_len          = strlen(cache_key);
+    size_t cached_len = 0;
+    size_t key_len = strlen(cache_key);
     const char* cached_json = cache_get(g_response_cache, cache_key, key_len, &cached_len);
     if (cached_json) {
         send_cache_json(conn, cached_json, cached_len);
@@ -83,16 +83,18 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
         return;
     }
 
-    pgconn_t* db             = get_pgconn(conn);
+    pgconn_t* db = get_pgconn(conn);
     static const char* query = "SELECT text FROM pages WHERE file_id=$1 AND page_num=$2 LIMIT 1";
-    const char* params[]     = {file_id_str, page_num_str};
+    const char* params[] = {file_id_str, page_num_str};
 
     PGresult* res = pgconn_query_params(db, query, 2, params, NULL);
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
         return;
     }
-    defer({ PQclear(res); });
+    defer {
+        PQclear(res);
+    };
 
     if (PQntuples(res) == 0) {
         conn_set_status(conn, StatusNotFound);
@@ -117,9 +119,9 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
 void render_pdf_page_as_png(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
 
-    const char* file_id_str  = get_path_param(conn, "file_id");
+    const char* file_id_str = get_path_param(conn, "file_id");
     const char* page_num_str = get_path_param(conn, "page_num");
-    const char* type         = query_get(conn, "type");
+    const char* type = query_get(conn, "type");
 
     if (type == NULL) {
         type = "png";
@@ -148,8 +150,8 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
 
     static const char png_headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
     static const char pdf_headers[] = "Content-Type: application/pdf\r\nCache-Control: public, max-age=3600\r\n";
-    size_t length                   = 0;
-    size_t key_len                  = strlen(cache_key);
+    size_t length = 0;
+    size_t key_len = strlen(cache_key);
 
     const char* bytes = cache_get(g_response_cache, cache_key, key_len, &length);
     if (bytes) {
@@ -164,15 +166,17 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     }
 
     static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
-    const char* params[]     = {file_id_str};
+    const char* params[] = {file_id_str};
 
-    pgconn_t* db  = get_pgconn(conn);
+    pgconn_t* db = get_pgconn(conn);
     PGresult* res = pgconn_query_params(db, query, 1, params, NULL);
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
         return;
     }
-    defer({ PQclear(res); });
+    defer {
+        PQclear(res);
+    };
 
     if (PQntuples(res) == 0) {
         conn_set_status(conn, StatusNotFound);
@@ -187,7 +191,7 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
         return;
     }
 
-    pdf_buffer_t byte_buf                                                            = {0};
+    pdf_buffer_t byte_buf = {0};
     bool (*renderFunc)(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer) = NULL;
 
     if (strcmp(type, "png") == 0) {
@@ -212,10 +216,10 @@ void pdf_search(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     ASSERT(g_response_cache);
 
-    const char* fileId     = query_get(conn, "file_id");
-    const char* query      = query_get(conn, "q");
+    const char* fileId = query_get(conn, "file_id");
+    const char* query = query_get(conn, "q");
     const char* ai_enabled = query_get(conn, "ai_enabled");
-    const bool use_ai      = !(ai_enabled && strcmp(ai_enabled, "false") == 0);
+    const bool use_ai = !(ai_enabled && strcmp(ai_enabled, "false") == 0);
 
     if (!query || query[0] == '\0') {
         send_json_error(conn, "Missing search query");
@@ -227,7 +231,7 @@ void pdf_search(PulsarCtx* ctx) {
     snprintf(cache_key, sizeof(cache_key), "search:%s:%s", query, fileId ? fileId : "all");
     size_t key_len = strlen(cache_key);
 
-    size_t cached_len       = 0;
+    size_t cached_len = 0;
     const char* cached_json = cache_get(g_response_cache, cache_key, key_len, &cached_len);
     if (cached_json) {
         send_cache_json(conn, cached_json, cached_len);
@@ -239,33 +243,33 @@ void pdf_search(PulsarCtx* ctx) {
 
     const char* params[2];
     int param_count = 1;
-    params[0]       = query;
+    params[0] = query;
 
-    const char* common_cte =
-        "WITH input_queries AS ("
-        "  SELECT "
-        "    websearch_to_tsquery('english', $1) as broad_query, "
-        "    phraseto_tsquery('english', $1) as phrase_query "
-        "), "
-        "RankedPages AS ("
-        "  SELECT "
-        "    p.file_id, p.page_num, "
-        "    ( "
-        "      ts_rank_cd(p.text_vector, inputs.broad_query) "
-        "      + "
-        "      (CASE WHEN p.text_vector @@ inputs.phrase_query THEN 10.0 ELSE 0.0 END) "
-        "    ) as rank "
-        "  FROM pages p "
-        "  CROSS JOIN input_queries inputs "
-        "  WHERE p.text_vector @@ inputs.broad_query ";
+    const char* common_cte = "WITH input_queries AS ("
+                             "  SELECT "
+                             "    websearch_to_tsquery('english', $1) as broad_query, "
+                             "    phraseto_tsquery('english', $1) as phrase_query "
+                             "), "
+                             "RankedPages AS ("
+                             "  SELECT "
+                             "    p.file_id, p.page_num, "
+                             "    ( "
+                             "      ts_rank_cd(p.text_vector, inputs.broad_query) "
+                             "      + "
+                             "      (CASE WHEN p.text_vector @@ inputs.phrase_query THEN 10.0 ELSE 0.0 END) "
+                             "    ) as rank "
+                             "  FROM pages p "
+                             "  CROSS JOIN input_queries inputs "
+                             "  WHERE p.text_vector @@ inputs.broad_query ";
 
     // Combining strings for specific file vs all files
     char full_query[4096];
 
     if (fileId) {
-        params[1]   = fileId;
+        params[1] = fileId;
         param_count = 2;
-        snprintf(full_query, sizeof(full_query),
+        snprintf(full_query,
+                 sizeof(full_query),
                  "%s AND p.file_id = $2 "
                  "  ORDER BY rank DESC LIMIT 100 "
                  "), "
@@ -286,7 +290,8 @@ void pdf_search(PulsarCtx* ctx) {
                  "ORDER BY u.rank DESC, f.name, u.page_num LIMIT 100",
                  common_cte);
     } else {
-        snprintf(full_query, sizeof(full_query),
+        snprintf(full_query,
+                 sizeof(full_query),
                  "%s "
                  "  ORDER BY rank DESC LIMIT 100 "
                  "), "
@@ -315,30 +320,34 @@ void pdf_search(PulsarCtx* ctx) {
         send_json_error(conn, pgconn_error_message(db));
         return;
     }
-    defer({ PQclear(res); });
+    defer {
+        PQclear(res);
+    };
 
     // --- Build Context for AI (keep logic here as it interacts with AI service) ---
     const size_t MAX_CONTEXT_SIZE = 30 * 1024;
-    size_t context_capacity       = 32 * 1024;
-    char* context                 = (char*)malloc(context_capacity);
+    size_t context_capacity = 32 * 1024;
+    char* context = (char*)malloc(context_capacity);
     if (!context) {
         send_json_error(conn, "Failed to allocate memory for context");
         return;
     }
-    defer({ free(context); });
+    defer {
+        free(context);
+    };
 
-    context[0]         = '\0';
+    context[0] = '\0';
     size_t context_len = 0;
-    int ntuples        = PQntuples(res);
-    int context_limit  = (ntuples < 15) ? ntuples : 15;
+    int ntuples = PQntuples(res);
+    int context_limit = (ntuples < 15) ? ntuples : 15;
 
     for (int i = 0; i < context_limit; i++) {
         bool valid;
         int num_pages = pg_get_int(res, i, 2, &valid);
-        int page_num  = pg_get_int(res, i, 3, &valid);
+        int page_num = pg_get_int(res, i, 3, &valid);
         if (!valid) continue;
 
-        const char* file_name        = PQgetvalue(res, i, 1);
+        const char* file_name = PQgetvalue(res, i, 1);
         const char* extended_snippet = PQgetvalue(res, i, 5);
 
         int header_len =
@@ -346,23 +355,27 @@ void pdf_search(PulsarCtx* ctx) {
         if (header_len < 0) continue;
 
         size_t snippet_len = strlen(extended_snippet);
-        size_t needed      = context_len + (size_t)header_len + snippet_len + 3;
+        size_t needed = context_len + (size_t)header_len + snippet_len + 3;
 
         if (needed > MAX_CONTEXT_SIZE) break;
 
         if (needed > context_capacity) {
             size_t new_cap = context_capacity * 2;
-            while (new_cap < needed)
-                new_cap *= 2;
+            while (new_cap < needed) new_cap *= 2;
             char* new_ctx = realloc(context, new_cap);
             if (!new_ctx) break;
 
-            context          = new_ctx;
+            context = new_ctx;
             context_capacity = new_cap;
         }
 
-        int written = snprintf(context + context_len, context_capacity - context_len,
-                               "\n=== EXCERPT %d: [%s, Page %d of %d] ===\n", i + 1, file_name, page_num, num_pages);
+        int written = snprintf(context + context_len,
+                               context_capacity - context_len,
+                               "\n=== EXCERPT %d: [%s, Page %d of %d] ===\n",
+                               i + 1,
+                               file_name,
+                               page_num,
+                               num_pages);
 
         if (written > 0) {
             context_len += (size_t)written;
@@ -370,11 +383,11 @@ void pdf_search(PulsarCtx* ctx) {
             context_len += snippet_len;
             context[context_len++] = '\n';
             context[context_len++] = '\n';
-            context[context_len]   = '\0';
+            context[context_len] = '\0';
         }
     }
 
-    char* ai_summary       = NULL;
+    char* ai_summary = NULL;
     bool ai_summary_cached = false;
 
     if (use_ai) {
@@ -408,10 +421,10 @@ void pdf_search(PulsarCtx* ctx) {
 }
 
 void list_files(PulsarCtx* ctx) {
-    PulsarConn* conn          = ctx->conn;
-    const char* page_str      = query_get(conn, "page");
+    PulsarConn* conn = ctx->conn;
+    const char* page_str = query_get(conn, "page");
     const char* page_size_str = query_get(conn, "limit");
-    const char* name          = query_get(conn, "name");
+    const char* name = query_get(conn, "name");
 
     ASSERT(g_response_cache);
 
@@ -430,8 +443,8 @@ void list_files(PulsarCtx* ctx) {
         snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d", page, page_size);
     }
 
-    size_t cached_len       = 0;
-    size_t key_len          = strlen(cache_key);
+    size_t cached_len = 0;
+    size_t key_len = strlen(cache_key);
     const char* cached_json = cache_get(g_response_cache, cache_key, key_len, &cached_len);
     if (cached_json) {
         send_cache_json(conn, cached_json, cached_len);
@@ -442,12 +455,14 @@ void list_files(PulsarCtx* ctx) {
     pgconn_t* db = get_pgconn(conn);
 
     const char* count_query = "SELECT COUNT(*) FROM files";
-    PGresult* count_res     = pgconn_query(db, count_query, NULL);
+    PGresult* count_res = pgconn_query(db, count_query, NULL);
     if (!count_res) {
         send_json_error(conn, pgconn_error_message(db));
         return;
     }
-    defer({ PQclear(count_res); });
+    defer {
+        PQclear(count_res);
+    };
 
     int64_t total_count = 0;
     if (PQntuples(count_res) > 0) {
@@ -466,15 +481,15 @@ void list_files(PulsarCtx* ctx) {
     if (name && name[0] != '\0') {
         char nameFilter[128];
         snprintf(nameFilter, sizeof(nameFilter), "%%%s%%", name);
-        query     = "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3";
+        query = "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3";
         params[0] = nameFilter;
         params[1] = limit_str;
         params[2] = offset_str;
         param_count = 3;
     } else {
-        query       = "SELECT id, name, path, num_pages FROM files ORDER BY name LIMIT $1 OFFSET $2";
-        params[0]   = limit_str;
-        params[1]   = offset_str;
+        query = "SELECT id, name, path, num_pages FROM files ORDER BY name LIMIT $1 OFFSET $2";
+        params[0] = limit_str;
+        params[1] = offset_str;
         param_count = 2;
     }
 
@@ -483,7 +498,9 @@ void list_files(PulsarCtx* ctx) {
         send_json_error(conn, pgconn_error_message(db));
         return;
     }
-    defer({ PQclear(res); });
+    defer {
+        PQclear(res);
+    };
 
     // Use new JSON generator
     size_t jsonlen = 0;
@@ -501,7 +518,7 @@ void list_files(PulsarCtx* ctx) {
 void get_file_by_id(PulsarCtx* ctx) {
     ASSERT(g_response_cache);
 
-    PulsarConn* conn        = ctx->conn;
+    PulsarConn* conn = ctx->conn;
     const char* file_id_str = get_path_param(conn, "file_id");
     int64_t file_id;
     if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
@@ -512,8 +529,8 @@ void get_file_by_id(PulsarCtx* ctx) {
     char cache_key[CACHE_KEY_MAX_LEN] = {};
     cache_make_key(cache_key, sizeof(cache_key), file_id, -1);
 
-    size_t cached_len       = 0;
-    size_t key_len          = strlen(cache_key);
+    size_t cached_len = 0;
+    size_t key_len = strlen(cache_key);
     const char* cached_json = cache_get(g_response_cache, cache_key, key_len, &cached_len);
     if (cached_json) {
         send_cache_json(conn, cached_json, cached_len);
@@ -522,15 +539,17 @@ void get_file_by_id(PulsarCtx* ctx) {
     }
 
     static const char* query = "SELECT name, path, num_pages FROM files WHERE id=$1 LIMIT 1";
-    const char* params[]     = {file_id_str};
+    const char* params[] = {file_id_str};
 
-    pgconn_t* db  = get_pgconn(conn);
+    pgconn_t* db = get_pgconn(conn);
     PGresult* res = pgconn_query_params(db, query, 1, params, NULL);
     if (!res) {
         send_json_error(conn, pgconn_error_message(db));
         return;
     }
-    defer({ PQclear(res); });
+    defer {
+        PQclear(res);
+    };
 
     if (PQntuples(res) == 0) {
         conn_set_status(conn, StatusNotFound);
@@ -538,13 +557,13 @@ void get_file_by_id(PulsarCtx* ctx) {
         return;
     }
 
-    const char* file_name     = PQgetvalue(res, 0, 0);
-    const char* file_path     = PQgetvalue(res, 0, 1);
+    const char* file_name = PQgetvalue(res, 0, 0);
+    const char* file_path = PQgetvalue(res, 0, 1);
     const char* num_pages_str = PQgetvalue(res, 0, 2);
-    int64_t num_pages         = strtoll(num_pages_str, NULL, 10);
+    int64_t num_pages = strtoll(num_pages_str, NULL, 10);
 
     // Use new JSON generator
-    size_t length  = 0;
+    size_t length = 0;
     char* json_str = json_create_file_response(file_id, file_name, file_path, num_pages, &length);
     if (!json_str) {
         send_json_error(conn, "Failed to serialize JSON");

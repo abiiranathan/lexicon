@@ -17,7 +17,7 @@ typedef struct {
 
 // Callback for curl to write response data
 static size_t _write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
-    size_t realsize       = size * nmemb;
+    size_t realsize = size * nmemb;
     curl_response_t* resp = (curl_response_t*)userp;
 
     char* ptr = realloc(resp->data, resp->size + realsize + 1);
@@ -62,13 +62,14 @@ void destroy_ai_cache(void) {
  */
 static char* _build_gemini_prompt(const char* query, const char* context, size_t context_len) {
     size_t prompt_size = context_len + 3072;  // 3K for static prompt
-    char* prompt       = (char*)malloc(prompt_size);
+    char* prompt = (char*)malloc(prompt_size);
     if (!prompt) {
         LOG_ERROR("Failed to allocate memory for prompt");
         return NULL;
     }
 
-    snprintf(prompt, prompt_size,
+    snprintf(prompt,
+             prompt_size,
              "You are an expert AI assistant helping users find information about their query. Queries "
              "are mostly about Medical and Programming topics. "
              "Use your comprehensive knowledge to provide accurate answers. "
@@ -111,7 +112,8 @@ static char* _build_gemini_prompt(const char* query, const char* context, size_t
              "- Broad questions: 50-100 sentences with comprehensive coverage\n"
              "- Medical treatment protocols: Complete but prioritize the core regimen first\n\n"
              "Your response must be pure HTML that directly answers the user's question.",
-             query, context);
+             query,
+             context);
 
     return prompt;
 }
@@ -132,9 +134,9 @@ static char* _build_gemini_request(const char* prompt) {
     yyjson_mut_doc_set_root(req_doc, req_root);
 
     yyjson_mut_val* contents_arr = yyjson_mut_arr(req_doc);
-    yyjson_mut_val* content_obj  = yyjson_mut_obj(req_doc);
-    yyjson_mut_val* parts_arr    = yyjson_mut_arr(req_doc);
-    yyjson_mut_val* part_obj     = yyjson_mut_obj(req_doc);
+    yyjson_mut_val* content_obj = yyjson_mut_obj(req_doc);
+    yyjson_mut_val* parts_arr = yyjson_mut_arr(req_doc);
+    yyjson_mut_val* part_obj = yyjson_mut_obj(req_doc);
 
     yyjson_mut_obj_add_str(req_doc, part_obj, "text", prompt);
     yyjson_mut_arr_append(parts_arr, part_obj);
@@ -163,7 +165,7 @@ static bool _call_gemini_api(const char* url, const char* json_body, curl_respon
     }
 
     struct curl_slist* headers = NULL;
-    headers                    = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Content-Type: application/json");
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -172,7 +174,7 @@ static bool _call_gemini_api(const char* url, const char* json_body, curl_respon
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
 
-    CURLcode res   = curl_easy_perform(curl);
+    CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
@@ -187,7 +189,8 @@ static bool _call_gemini_api(const char* url, const char* json_body, curl_respon
     if (http_code != 200) {
         LOG_ERROR("HTTP request failed with status code: %ld\n", http_code);
         if (response->data && response->size > 0) {
-            LOG_ERROR("[AI Summary] Error response body: %.*s\n", (int)(response->size > 500 ? 500 : response->size),
+            LOG_ERROR("[AI Summary] Error response body: %.*s\n",
+                      (int)(response->size > 500 ? 500 : response->size),
                       response->data);
         }
         return false;
@@ -214,7 +217,9 @@ static char* _parse_gemini_response(const char* response_data, size_t response_s
         LOG_ERROR("Failed to parse JSON response");
         return NULL;
     }
-    defer({ yyjson_doc_free(resp_doc); });
+    defer {
+        yyjson_doc_free(resp_doc);
+    };
 
     yyjson_val* root = yyjson_doc_get_root(resp_doc);
     if (!root) {
@@ -298,11 +303,11 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
 
     // Check the cache first
     const char* gemini_resp = NULL;
-    size_t query_len        = strlen(query);
+    size_t query_len = strlen(query);
 
     if (ai_response_cache) {
         size_t outlen = 0;
-        gemini_resp   = cache_get(ai_response_cache, query, query_len, &outlen);
+        gemini_resp = cache_get(ai_response_cache, query, query_len, &outlen);
         if (gemini_resp) {
             *is_cached = true;
             return (char*)gemini_resp;
@@ -312,27 +317,27 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
     // Get model name (allow override via env var)
     const char* gemini_model = getenv("GEMINI_MODEL");
     if (!gemini_model || strcmp(gemini_model, "") == 0) {
-        gemini_model = "gemini-2.0-flash";  // Mostly available. 2.5-flash is always 503 Unavailable
+        gemini_model = "gemini-2.0-flash";
     }
 
     // Build the API URL
     char url[512];
-    snprintf(url, sizeof(url),
+    snprintf(url,
+             sizeof(url),
              "https://generativelanguage.googleapis.com/v1beta/models/"
              "%s:generateContent?key=%s",
-             gemini_model, api_key);
-
+             gemini_model,
+             api_key);
     size_t context_size = strlen(context);
-
-    LOG_ERROR("[AI Summary] Info: Sending request to Gemini API for query: \"%s\"\n", query);
-    LOG_ERROR("[AI Summary] Info: Context size: %zu characters\n", context_size);
-
     // Build the prompt
     char* prompt = _build_gemini_prompt(query, context, context_size);
     if (!prompt) {
         return NULL;
     }
-    defer({ free(prompt); });
+
+    defer {
+        free(prompt);
+    };
 
     // Build JSON request
     char* json_body = _build_gemini_request(prompt);
@@ -340,7 +345,9 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
         LOG_ERROR("Failed to build JSON request");
         return NULL;
     }
-    defer({ free(json_body); });
+    defer {
+        free(json_body);
+    };
 
     // Make API call
     curl_response_t response = {0};
@@ -348,7 +355,9 @@ char* get_ai_summary(const char* query, const char* context, const char* api_key
         free(response.data);
         return NULL;
     }
-    defer({ free(response.data); });
+    defer {
+        free(response.data);
+    };
 
     // Parse response
     gemini_resp = _parse_gemini_response(response.data, response.size);

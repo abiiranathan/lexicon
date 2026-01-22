@@ -50,7 +50,9 @@ static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char*
             all_ok = false;
             continue;
         }
-        defer({ g_object_unref(page); });
+        defer {
+            g_object_unref(page);
+        };
 
         // Extract text from the page
         char* text = poppler_page_get_text(page);
@@ -61,7 +63,9 @@ static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char*
             }
             continue;
         }
-        defer({ g_free(text); });
+        defer {
+            g_free(text);
+        };
 
         // Clean the PDF text
         size_t len = strlen(text);
@@ -83,7 +87,10 @@ static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char*
         // Insert page
         PGresult* res = pgconn_query_params_safe(conn, page_insert_query, 3, values, NULL);
         if (!res) {
-            fprintf(stderr, ">>> Failed to insert page %d of %s: %s\n", page_num + 1, name,
+            fprintf(stderr,
+                    ">>> Failed to insert page %d of %s: %s\n",
+                    page_num + 1,
+                    name,
                     pgconn_error_message_safe(conn));
             all_ok = false;
             // Continue processing other pages
@@ -104,23 +111,27 @@ static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char*
 static void process_pdf_task(void* arg) {
     PDFProcessParams* params = arg;
 
-    defer({
+    defer {
         free(params->path);
         free(params->name);
         free(params);
-    });
+    };
 
     // Create dedicated connection for this task
     pgconn_t* conn = pgconn_create(params->config);
-    ASSERT(conn != nullptr);
-    defer({ pgconn_destroy(conn); });
+    ASSERT(conn != NULL);
+    defer {
+        pgconn_destroy(conn);
+    };
 
     // Open the PDF document
     char* uri = g_filename_to_uri(params->path, NULL, NULL);
-    ASSERT(uri != nullptr);
-    defer({ g_free(uri); });
+    ASSERT(uri != NULL);
+    defer {
+        g_free(uri);
+    };
 
-    GError* error        = NULL;
+    GError* error = NULL;
     PopplerDocument* doc = poppler_document_new_from_file(uri, NULL, &error);
     if (!doc) {
         fprintf(stderr, ">>> Worker failed to open PDF %s: %s\n", params->path, error->message);
@@ -128,12 +139,17 @@ static void process_pdf_task(void* arg) {
         atomic_store(params->success, false);
         return;
     }
-    defer({ g_object_unref(doc); });
+    defer {
+        g_object_unref(doc);
+    };
 
     // Verify page count matches
     int actual_pages = poppler_document_get_n_pages(doc);
     if (actual_pages != params->npages) {
-        fprintf(stderr, ">>> Page count mismatch for %s: expected %d, got %d\n", params->name, params->npages,
+        fprintf(stderr,
+                ">>> Page count mismatch for %s: expected %d, got %d\n",
+                params->name,
+                params->npages,
                 actual_pages);
         atomic_store(params->success, false);
         return;
@@ -141,15 +157,15 @@ static void process_pdf_task(void* arg) {
 
     // Begin single transaction for entire PDF
     PGresult* begin_res = pgconn_query_safe(conn, "BEGIN", NULL);
-    ASSERT(begin_res != nullptr);
+    ASSERT(begin_res != NULL);
     PQclear(begin_res);
 
     bool pages_ok = false;
 
     // Ensure transaction is closed on all exit paths
-    defer({
+    defer {
         const char* end_cmd = pages_ok ? "COMMIT" : "ROLLBACK";
-        PGresult* end_res   = pgconn_query_safe(conn, end_cmd, NULL);
+        PGresult* end_res = pgconn_query_safe(conn, end_cmd, NULL);
         if (end_res) {
             PQclear(end_res);
         } else {
@@ -160,7 +176,7 @@ static void process_pdf_task(void* arg) {
                 PQclear(fallback);
             }
         }
-    });
+    };
 
     // Process all pages within the transaction
     pages_ok = process_all_pages(doc, params->file_id, params->name, params->npages, conn);
@@ -192,17 +208,14 @@ typedef struct {
  * @param userdata Pointer to WalkDirUserData structure.
  * @return DirContinue to continue, DirSkip to skip directory, DirStop to halt.
  */
-static WalkDirOption walk_dir_callback(const char* path, const char* name, void* userdata) {
-    if (name == nullptr || strlen(name) == 0 || name[0] == '.') {
-        return DirContinue;
-    }
-
+static WalkDirOption walk_dir_callback(const FileAttributes* attr, const char* path, const char* name, void* userdata) {
+    (void)attr;
     // Skip common build/dependency directories
+    // NULL-terminated array.
     static const char* skip_dirs[] = {
-        "node_modules", ".git",   ".svn",    ".hg",       "__pycache__", ".pytest_cache", ".mypy_cache",
-        ".tox",         "venv",   ".venv",   "env",       ".env",        "vendor",        "build",
-        "dist",         "target", ".gradle", ".idea",     ".vscode",     ".cache",        "coverage",
-        ".next",        ".nuxt",  ".turbo",  ".DS_Store", NULL,
+      "node_modules", ".git",   ".svn",     ".hg",    "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",    "venv",
+      ".venv",        "env",    ".env",     "vendor", "build",       "dist",          "target",      ".gradle", ".idea",
+      ".vscode",      ".cache", "coverage", ".next",  ".nuxt",       ".turbo",        ".DS_Store",   NULL,
     };
 
     for (size_t i = 0; skip_dirs[i] != NULL; i++) {
@@ -226,18 +239,22 @@ static WalkDirOption walk_dir_callback(const char* path, const char* name, void*
 
     // Convert file path to URI for poppler to check page count
     char* uri = g_filename_to_uri(path, NULL, NULL);
-    ASSERT(uri != nullptr);
-    defer({ g_free(uri); });
+    ASSERT(uri != NULL);
+    defer {
+        g_free(uri);
+    };
 
     // Open PDF to count pages
-    GError* error        = NULL;
+    GError* error = NULL;
     PopplerDocument* doc = poppler_document_new_from_file(uri, NULL, &error);
     if (!doc) {
         fprintf(stderr, ">>> Error opening PDF %s: %s. Skipping.\n", path, error->message);
         g_error_free(error);
         return DirContinue;
     }
-    defer({ g_object_unref(doc); });
+    defer {
+        g_object_unref(doc);
+    };
 
     int npages = poppler_document_get_n_pages(doc);
 
@@ -256,7 +273,7 @@ static WalkDirOption walk_dir_callback(const char* path, const char* name, void*
     snprintf(num_pages_str, sizeof(num_pages_str), "%d", npages);
 
     const char* file_values[] = {name, path, num_pages_str};
-    PGresult* res             = pgconn_query_params_safe(data->main_conn, file_insert_query, 3, file_values, NULL);
+    PGresult* res = pgconn_query_params_safe(data->main_conn, file_insert_query, 3, file_values, NULL);
 
     if (!res) {
         fprintf(stderr, ">>> Failed to insert file %s: %s\n", path, pgconn_error_message_safe(data->main_conn));
@@ -273,25 +290,25 @@ static WalkDirOption walk_dir_callback(const char* path, const char* name, void*
         PQclear(res);
         // File existed (conflict), query for ID
         const char* path_param[] = {path};
-        PGresult* id_res         = pgconn_query_params_safe(data->main_conn, file_id_query, 1, path_param, NULL);
-        ASSERT(id_res != nullptr && PQntuples(id_res) > 0);
+        PGresult* id_res = pgconn_query_params_safe(data->main_conn, file_id_query, 1, path_param, NULL);
+        ASSERT(id_res != NULL && PQntuples(id_res) > 0);
         file_id = atoll(PQgetvalue(id_res, 0, 0));
         PQclear(id_res);
     }
 
     // Allocate task parameters - ownership transfers to worker
     PDFProcessParams* params = malloc(sizeof(*params));
-    ASSERT(params != nullptr);
+    ASSERT(params != NULL);
 
-    params->path    = strdup(path);
-    params->name    = strdup(name);
+    params->path = strdup(path);
+    params->name = strdup(name);
     params->file_id = file_id;
-    params->npages  = npages;
-    params->config  = data->config;
+    params->npages = npages;
+    params->config = data->config;
     params->success = data->success;
 
-    ASSERT(params->path != nullptr);
-    ASSERT(params->name != nullptr);
+    ASSERT(params->path != NULL);
+    ASSERT(params->name != NULL);
 
     // Submit entire PDF processing task to threadpool
     threadpool_submit(data->thpool, process_pdf_task, params);
@@ -314,36 +331,40 @@ bool process_pdfs(pgconn_config_t* config, const char* root_dir, int min_pages, 
 
     // Create threadpool for PDF processing
     Threadpool* threadpool = threadpool_create(WORKERS);
-    ASSERT(threadpool != nullptr);
-    defer({ threadpool_destroy(threadpool, -1); });
+    ASSERT(threadpool != NULL);
+    defer {
+        threadpool_destroy(threadpool, -1);
+    };
 
     // Main thread connection for file inserts only
     pgconn_t* main_conn = pgconn_create(config);
-    ASSERT(main_conn != nullptr);
-    defer({ pgconn_destroy(main_conn); });
+    ASSERT(main_conn != NULL);
+    defer {
+        pgconn_destroy(main_conn);
+    };
 
     // Begin transaction on main connection for file inserts
     if (!dryrun) {
         PGresult* begin_res = pgconn_query_safe(main_conn, "BEGIN", NULL);
-        ASSERT(begin_res != nullptr);
+        ASSERT(begin_res != NULL);
         PQclear(begin_res);
 
-        defer({
+        defer {
             const char* end_cmd = atomic_load(&success) ? "COMMIT" : "ROLLBACK";
-            PGresult* end_res   = pgconn_query_safe(main_conn, end_cmd, NULL);
-            ASSERT(end_res != nullptr);
+            PGresult* end_res = pgconn_query_safe(main_conn, end_cmd, NULL);
+            ASSERT(end_res != NULL);
             PQclear(end_res);
-        });
+        };
     }
 
     // Walk directory tree
     WalkDirUserData data = {
-        .main_conn = main_conn,
-        .thpool    = threadpool,
-        .config    = config,
-        .min_pages = min_pages,
-        .success   = &success,
-        .dryrun    = dryrun,
+      .main_conn = main_conn,
+      .thpool = threadpool,
+      .config = config,
+      .min_pages = min_pages,
+      .success = &success,
+      .dryrun = dryrun,
     };
 
     if (dryrun) {
@@ -351,9 +372,6 @@ bool process_pdfs(pgconn_config_t* config, const char* root_dir, int min_pages, 
     }
 
     int walk_result = dir_walk(root_dir, walk_dir_callback, &data);
-    if (walk_result != 0) {
-        atomic_store(&success, false);
-    }
-
+    atomic_store(&success, walk_result == 0);
     return atomic_load(&success);
 }

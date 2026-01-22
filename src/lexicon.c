@@ -47,12 +47,12 @@ static void pre_exec_func(void* user_data) {
 
 // Handler for the index subcommand.
 static void build_index_handler(void* user_data) {
-    AppConfig* appcfg      = user_data;
+    AppConfig* appcfg = user_data;
     pgconn_config_t pg_cfg = {
-        .conninfo               = config.pgconn,
-        .auto_reconnect         = true,
-        .max_reconnect_attempts = 5,
-        .thread_safe            = true,
+      .conninfo = config.pgconn,
+      .auto_reconnect = true,
+      .max_reconnect_attempts = 5,
+      .thread_safe = true,
     };
 
     process_pdfs(&pg_cfg, appcfg->root_dir, appcfg->min_pages, appcfg->dryrun);
@@ -61,9 +61,8 @@ static void build_index_handler(void* user_data) {
 
 void cors(PulsarCtx* ctx) {
     /* Add CORS headers for cross-origin clients */
-    static const char cors_hdr[] =
-        "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
-        "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
+    static const char cors_hdr[] = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
+                                   "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
     conn_writeheader_raw(ctx->conn, cors_hdr, sizeof(cors_hdr) - 1);
 }
 
@@ -85,13 +84,17 @@ int main(int argc, char* argv[]) {
     load_dotenv(".env");
 
     init();
-    defer({ cleanup(); });
+    defer {
+        cleanup();
+    };
 
     ensure_valid_pgconn();
 
     FlagParser* parser = flag_parser_new("lexicon", "Fast PDF indexer and server");
     ASSERT_NOT_NULL(parser);
-    defer({ flag_parser_free(parser); });
+    defer {
+        flag_parser_free(parser);
+    };
 
     // Global flags
     flag_int(parser, "port", 'p', "The server port", &config.port);
