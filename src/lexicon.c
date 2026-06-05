@@ -1,15 +1,12 @@
 #include <curl/curl.h>
-#include <pgconn/pgconn.h>
 #include <pulsar/pulsar.h>
 #include <solidc/defer.h>
 #include <solidc/dotenv.h>
 #include <solidc/flags.h>
 #include <solidc/macros.h>
 
-#include "../include/ai.h"
 #include "../include/cli.h"
 #include "../include/database.h"
-#include "../include/logger.h"
 #include "../include/routes.h"
 
 #define INFO(msg) printf(">>> %s\n", msg);
@@ -25,11 +22,14 @@ typedef struct {
 
 static AppConfig config = {.port = 8080, .min_pages = 4};
 
-void ensure_valid_pgconn() {
+// Checks for non-empty postgres connection string.
+void ensure_valid_pgconn_string() {
+    // Use config connection is passed.
     if (config.pgconn) {
         return;
     }
 
+    // Fallback to environment variable PGCONN
     config.pgconn = getenv("PGCONN");
     if (config.pgconn == NULL) {
         puts("PGCONN environment variable must be set or pass --pgconn flag to the program");
@@ -40,81 +40,72 @@ void ensure_valid_pgconn() {
 // Connect to database before invoking handler.
 static void pre_exec_func(void* user_data) {
     AppConfig* c = user_data;
-    ensure_valid_pgconn();
+    ensure_valid_pgconn_string();
     init_connections(c->pgconn);
     create_schema();
+    puts("Connected to database and initialized schema");
 }
 
 // Handler for the index subcommand.
 static void build_index_handler(void* user_data) {
     AppConfig* appcfg = user_data;
-    pgconn_config_t pg_cfg = {
-      .conninfo = config.pgconn,
-      .auto_reconnect = true,
-      .max_reconnect_attempts = 5,
-      .thread_safe = true,
-    };
-
-    process_pdfs(&pg_cfg, appcfg->root_dir, appcfg->min_pages, appcfg->dryrun);
+    process_pdfs(appcfg->root_dir, appcfg->min_pages, appcfg->dryrun);
     exit(EXIT_SUCCESS);
 }
 
+// CORS middleware.
 void cors(PulsarCtx* ctx) {
     /* Add CORS headers for cross-origin clients */
-    static const char cors_hdr[] = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
-                                   "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
-    conn_writeheader_raw(ctx->conn, cors_hdr, sizeof(cors_hdr) - 1);
+    static const char cors_headers[] =
+        "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
+        "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
+    conn_writeheader_raw(ctx->conn, cors_headers, sizeof(cors_headers) - 1);
 }
 
 static void init() {
     curl_global_init(0);
     ASSERT(init_response_cache(1024, 300));
-    ASSERT(init_ai_cache(500, 24 * 60 * 60));
 }
 
 static void cleanup() {
     close_connections();
     destroy_response_cache();
-    destroy_ai_cache();
     curl_global_cleanup();
 }
 
 int main(int argc, char* argv[]) {
     // Load .env if exists
     load_dotenv(".env");
-
     init();
     defer {
         cleanup();
     };
 
-    ensure_valid_pgconn();
+    ensure_valid_pgconn_string();
 
     FlagParser* parser = flag_parser_new("lexicon", "Fast PDF indexer and server");
-    ASSERT_NOT_NULL(parser);
+    ASSERT(parser);
     defer {
         flag_parser_free(parser);
     };
 
-    // Global flags
     flag_int(parser, "port", 'p', "The server port", &config.port);
     flag_string(parser, "addr", 'a', "Bind address", &config.bind_addr);
     flag_string(parser, "pgconn", 'c', "Postgres connection URI", &config.pgconn);
 
-    // Index subcommand
-    FlagParser* index = flag_add_subcommand(parser, "index", "Build PDF index into the database", build_index_handler);
-    ASSERT_NOT_NULL(index);
+    FlagParser* index = flag_add_subcommand(parser, "index", "Build PDF index into the database",
+                                            build_index_handler);
     flag_req_string(index, "root", 'r', "Root directory of pdfs", &config.root_dir);
-    flag_int(index, "min_pages", 'p', "Minimum number of pages in PDF to be indexed", &config.min_pages);
+    flag_int(index, "min_pages", 'p', "Minimum number of pages in PDF to be indexed",
+             &config.min_pages);
     flag_bool(index, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun);
 
-    // pre-invoke command.
     flag_set_pre_invoke(parser, pre_exec_func);
 
     // Set the server config as user-data for all handlers.
     FlagStatus status = flag_parse_and_invoke(parser, argc, argv, &config);
     if (status != FLAG_OK) {
-        fprintf(stderr, "ERROR: %s(code=%d)\n", flag_status_str(status), status);
+        fprintf(stderr, "ERROR: %s\n", flag_status_str(status));
         flag_print_usage(parser);
         exit(EXIT_FAILURE);
     }
@@ -130,7 +121,7 @@ int main(int argc, char* argv[]) {
 
     // Since we are using / for static assets, put at the end to avoid collisions
     route_static("/", "./ui/dist");
-    pulsar_set_callback(logger);
+    pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
 
     Middleware mw[] = {cors};
     use_global_middleware(mw, sizeof(mw) / sizeof(mw[0]));

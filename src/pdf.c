@@ -68,7 +68,8 @@ void render_page_to_image(PopplerPage* page, int width, int height, const char* 
     LOCK_CAIRO_MUTEX();
 
     // Create the Cairo image surface
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, pixel_width, pixel_height);
+    cairo_surface_t* surface =
+        cairo_image_surface_create(CAIRO_FORMAT_RGB24, pixel_width, pixel_height);
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
         fprintf(stderr, "Error: Failed to create Cairo surface\n");
         UNLOCK_CAIRO_MUTEX();
@@ -127,7 +128,8 @@ typedef struct {
  * @param length Length of data in bytes.
  * @return CAIRO_STATUS_SUCCESS on success, CAIRO_STATUS_WRITE_ERROR on allocation failure.
  */
-static cairo_status_t cairo_write_to_buffer(void* closure, const unsigned char* data, unsigned int length) {
+static cairo_status_t cairo_write_to_buffer(void* closure, const unsigned char* data,
+                                            unsigned int length) {
     cairo_write_context_t* ctx = (cairo_write_context_t*)closure;
 
     // Ensure we have enough capacity
@@ -173,7 +175,8 @@ bool render_page_to_buffer(PopplerPage* page, int width, int height, pdf_buffer_
     LOCK_CAIRO_MUTEX();
 
     // Create the Cairo image surface
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
+    cairo_surface_t* surface =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
         fprintf(stderr, "Error: Failed to create Cairo surface\n");
         UNLOCK_CAIRO_MUTEX();
@@ -209,13 +212,15 @@ bool render_page_to_buffer(PopplerPage* page, int width, int height, pdf_buffer_
     cairo_write_context_t write_ctx = {.data = NULL, .size = 0, .capacity = 0};
 
     // Write PNG to memory buffer
-    cairo_status_t status = cairo_surface_write_to_png_stream(surface, cairo_write_to_buffer, &write_ctx);
+    cairo_status_t status =
+        cairo_surface_write_to_png_stream(surface, cairo_write_to_buffer, &write_ctx);
 
     cairo_destroy(cr);
     cairo_surface_destroy(surface);
 
     if (status != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Could not write PNG to buffer: %s\n", cairo_status_to_string(status));
+        fprintf(stderr, "Error: Could not write PNG to buffer: %s\n",
+                cairo_status_to_string(status));
         free(write_ctx.data);
         return false;
     }
@@ -263,7 +268,8 @@ bool render_page_from_document(const char* pdf_path, int page_num, const char* o
     return true;
 }
 
-bool render_page_from_document_to_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer) {
+bool render_page_from_document_to_buffer(const char* pdf_path, int page_num,
+                                         pdf_buffer_t* out_buffer) {
     if (pdf_path == NULL || out_buffer == NULL) {
         fprintf(stderr, "Error: Invalid parameters to render_page_from_document_to_buffer\n");
         return false;
@@ -401,7 +407,8 @@ typedef struct {
  * @param length Length of data in bytes.
  * @return CAIRO_STATUS_SUCCESS on success, CAIRO_STATUS_WRITE_ERROR on failure.
  */
-static cairo_status_t cairo_write_to_gzip_buffer(void* closure, const unsigned char* data, unsigned int length) {
+static cairo_status_t cairo_write_to_gzip_buffer(void* closure, const unsigned char* data,
+                                                 unsigned int length) {
     cairo_gzip_write_context_t* ctx = (cairo_gzip_write_context_t*)closure;
 
     if (ctx->error_occurred) {
@@ -413,7 +420,8 @@ static cairo_status_t cairo_write_to_gzip_buffer(void* closure, const unsigned c
         ctx->stream = (z_stream){0};
         // windowBits = 15 + 16 for gzip format
         // int ret = deflateInit2(&ctx->stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
-        int ret = deflateInit2(&ctx->stream, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
+        int ret = deflateInit2(&ctx->stream, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8,
+                               Z_DEFAULT_STRATEGY);
         if (ret != Z_OK) {
             fprintf(stderr, "Error: Failed to initialize gzip compression: %d\n", ret);
             ctx->error_occurred = true;
@@ -508,7 +516,8 @@ static bool finalize_gzip_compression(cairo_gzip_write_context_t* ctx) {
     return true;
 }
 
-bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
+bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height,
+                                      pdf_buffer_t* out_buffer) {
     if (page == NULL || out_buffer == NULL) {
         fprintf(stderr, "Error: Invalid parameters to render_page_to_compressed_buffer\n");
         return false;
@@ -526,7 +535,8 @@ bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, 
     LOCK_CAIRO_MUTEX();
 
     // Create the Cairo image surface
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
+    cairo_surface_t* surface =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
         fprintf(stderr, "Error: Failed to create Cairo surface\n");
         UNLOCK_CAIRO_MUTEX();
@@ -559,17 +569,23 @@ bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, 
     UNLOCK_CAIRO_MUTEX();
 
     // Initialize gzip compression context
-    cairo_gzip_write_context_t write_ctx = {
-        .stream = {0}, .data = NULL, .size = 0, .capacity = 0, .initialized = false, .error_occurred = false};
+    cairo_gzip_write_context_t write_ctx = {.stream         = {0},
+                                            .data           = NULL,
+                                            .size           = 0,
+                                            .capacity       = 0,
+                                            .initialized    = false,
+                                            .error_occurred = false};
 
     // Write PNG to compressed buffer via streaming callback
-    cairo_status_t status = cairo_surface_write_to_png_stream(surface, cairo_write_to_gzip_buffer, &write_ctx);
+    cairo_status_t status =
+        cairo_surface_write_to_png_stream(surface, cairo_write_to_gzip_buffer, &write_ctx);
 
     cairo_destroy(cr);
     cairo_surface_destroy(surface);
 
     if (status != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Could not write PNG to buffer: %s\n", cairo_status_to_string(status));
+        fprintf(stderr, "Error: Could not write PNG to buffer: %s\n",
+                cairo_status_to_string(status));
         if (write_ctx.initialized) {
             deflateEnd(&write_ctx.stream);
         }
@@ -667,7 +683,8 @@ bool get_pdf_metadata(const char* filename, pdf_metadata_t* out_meta) {
     // This call checks if the underlying file structure implies encryption.
     // (Note: Poppler's API for encryption checking varies by version, this is a safe check).
     // Assuming the document opened successfully in open_document:
-    out_meta->is_encrypted = FALSE;  // If we opened it without password prompt logic, it's accessible.
+    out_meta->is_encrypted =
+        FALSE;  // If we opened it without password prompt logic, it's accessible.
 
     // String Properties
     out_meta->title    = poppler_document_get_title(doc);
@@ -710,7 +727,8 @@ bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer) {
 
     // Create PDF surface writing to stream (memory buffer)
     // We reuse the existing 'cairo_write_to_buffer' callback.
-    cairo_surface_t* surface = cairo_pdf_surface_create_for_stream(cairo_write_to_buffer, &write_ctx, width, height);
+    cairo_surface_t* surface =
+        cairo_pdf_surface_create_for_stream(cairo_write_to_buffer, &write_ctx, width, height);
 
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
         fprintf(stderr, "Error: Failed to create Cairo PDF surface\n");
@@ -755,7 +773,8 @@ bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer) {
     return true;
 }
 
-bool render_page_from_document_to_pdf_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer) {
+bool render_page_from_document_to_pdf_buffer(const char* pdf_path, int page_num,
+                                             pdf_buffer_t* out_buffer) {
     if (pdf_path == NULL || out_buffer == NULL) {
         fprintf(stderr, "Error: Invalid parameters\n");
         return false;

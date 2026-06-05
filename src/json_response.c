@@ -1,7 +1,7 @@
 #include "../include/json_response.h"
 #include "../include/database.h"
 
-#include <pgconn/pgtypes.h>
+#include <pgpool/pgtypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <yyjson.h>
@@ -27,7 +27,7 @@ char* json_create_error(const char* msg) {
     return serialize_doc(doc, NULL);
 }
 
-char* json_create_page_response(int64_t file_id, int page_num, const char* text) {
+StrSlice json_create_page_response(int64_t file_id, int page_num, const char* text) {
     yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -36,10 +36,13 @@ char* json_create_page_response(int64_t file_id, int page_num, const char* text)
     yyjson_mut_obj_add_int(doc, root, "page_num", page_num);
     yyjson_mut_obj_add_str(doc, root, "text", text ? text : "");
 
-    return serialize_doc(doc, NULL);
+    size_t out_len = 0;
+    char* data     = serialize_doc(doc, &out_len);
+    return ss_from(data, out_len);
 }
 
-char* json_create_file_response(int64_t id, const char* name, const char* path, int64_t num_pages, size_t* out_len) {
+char* json_create_file_response(int64_t id, const char* name, const char* path, int64_t num_pages,
+                                size_t* out_len) {
     yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -52,7 +55,8 @@ char* json_create_file_response(int64_t id, const char* name, const char* path, 
     return serialize_doc(doc, out_len);
 }
 
-char* json_create_file_list(PGresult* res, int page, int limit, int64_t total_count, size_t* out_len) {
+char* json_create_file_list(PGresult* res, int page, int limit, int64_t total_count,
+                            size_t* out_len) {
     yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -96,7 +100,7 @@ char* json_create_file_list(PGresult* res, int page, int limit, int64_t total_co
     return serialize_doc(doc, out_len);
 }
 
-char* json_create_search_results(PGresult* res, const char* query, const char* ai_summary, size_t* out_len) {
+char* json_create_search_results(PGresult* res, const char* query, size_t* out_len) {
     yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -132,12 +136,5 @@ char* json_create_search_results(PGresult* res, const char* query, const char* a
     yyjson_mut_obj_add_val(doc, root, "results", results_array);
     yyjson_mut_obj_add_uint(doc, root, "count", yyjson_mut_arr_size(results_array));
     yyjson_mut_obj_add_str(doc, root, "query", query);
-
-    if (ai_summary) {
-        yyjson_mut_obj_add_str(doc, root, "ai_summary", ai_summary);
-    } else {
-        yyjson_mut_obj_add_null(doc, root, "ai_summary");
-    }
-
     return serialize_doc(doc, out_len);
 }

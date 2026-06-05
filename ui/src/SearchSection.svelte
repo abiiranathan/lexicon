@@ -6,17 +6,10 @@
     currentTab: LocalStore<string>;
     onsubmit: () => void;
     onTabSwitch: (tab: string) => void;
-    useAI: boolean;
   };
 
-  let {
-    searchQuery,
-    currentTab,
-    onsubmit,
-    onTabSwitch,
-    useAI = $bindable(),
-  }: Props = $props();
-  let query = $state(searchQuery.value);
+  let { searchQuery, currentTab, onsubmit, onTabSwitch }: Props = $props();
+  let query = $derived(searchQuery.value);
 
   $effect(() => {
     searchQuery.set(query);
@@ -64,10 +57,6 @@
     >
       Browse Files
     </button>
-    <section class="ai-section">
-      <input type="checkbox" id="ai_enabled" bind:checked={useAI} />
-      <label for="ai_enabled">Generate AI Summary</label>
-    </section>
   </div>
 </section>
 
@@ -161,17 +150,6 @@
 
     .tabs {
       flex-wrap: wrap;
-    }
-  }
-
-  .ai-section {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-left: 2rem;
-
-    input {
-      scale: 1.5;
     }
   }
 </style>

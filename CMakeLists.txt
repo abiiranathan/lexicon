@@ -18,17 +18,15 @@ add_executable(${PROJECT_NAME}
     src/lexicon.c 
     src/routes.c 
     src/cli.c 
-    src/logger.c 
     src/pdf.c 
     src/pdf_preprocess.c
-    src/ai.c
     src/database.c
     src/json_response.c
 )
 
 # All dependencies from abiiranathan can be built from source with cmake
 target_link_libraries(${PROJECT_NAME} PRIVATE 
-    pgconn # github.com/abiiranathan/pgconn
+    pgpool # github.com/abiiranathan/pgpool
     solidc # github.com/abiiranathan/solidc
     pulsar # github.com/abiiranathan/pulsar
     yyjson # https://github.com/ibireme/yyjson

@@ -1,17 +1,5 @@
 <script lang="ts">
   let { query, results, duration, isLoading, error, onResultClick } = $props();
-
-  let aiSummary = $derived.by(() => {
-    if (!results.ai_summary) {
-      return null;
-    }
-
-    return (results.ai_summary as string)
-      .replace("```html", "") // Remove opening code fence (```) for HTML
-      .replace("```", ""); // Remove closing code fence (```)
-  });
-
-  $inspect(aiSummary);
 </script>
 
 {#if isLoading}
@@ -38,28 +26,6 @@
     <span>Found {results.count} results in {(duration / 1000).toFixed(0)}s</span
     >
   </div>
-
-  {#if aiSummary}
-    <div class="ai-summary-container">
-      <div class="ai-summary-header">
-        <svg
-          class="ai-icon"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
-          <path d="M2 17l10 5 10-5"></path>
-          <path d="M2 12l10 5 10-5"></path>
-        </svg>
-        <span class="ai-label">AI-Generated Summary</span>
-      </div>
-      <div class="ai-summary-content">
-        {@html aiSummary}
-      </div>
-    </div>
-  {/if}
 
   <div class="results-divider">
     <span>Individual Search Results</span>
@@ -175,99 +141,6 @@
     font-size: 0.875rem;
   }
 
-  /* AI Summary Styling */
-  .ai-summary-container {
-    background: linear-gradient(
-      135deg,
-      var(--ai-gradient-start) 0%,
-      var(--ai-gradient-end) 100%
-    );
-    border: 2px solid var(--ai-border);
-    border-radius: 0rem;
-    padding: 0;
-    margin-bottom: 2rem;
-    box-shadow:
-      0 4px 6px -1px rgba(59, 130, 246, 0.1),
-      0 2px 4px -1px rgba(59, 130, 246, 0.06);
-  }
-
-  .ai-summary-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 1rem 1.5rem;
-    border-bottom: 1px solid var(--ai-border);
-    background: rgba(30, 58, 95, 0.5);
-  }
-
-  .ai-icon {
-    width: 1.5rem;
-    height: 1.5rem;
-    color: var(--ai-accent);
-    flex-shrink: 0;
-  }
-
-  .ai-label {
-    font-weight: 600;
-    color: var(--ai-accent);
-    font-size: 0.95rem;
-    letter-spacing: 0.025em;
-  }
-
-  .ai-summary-content {
-    padding: 1.5rem;
-    color: var(--text-primary);
-    line-height: 1.7;
-    background: #152224;
-    border-radius: 0;
-  }
-
-  /* Style HTML elements inside AI summary */
-  .ai-summary-content :global(h3) {
-    color: var(--text-primary);
-    font-size: 1.25rem;
-    font-weight: 600;
-    margin-top: 0;
-    margin-bottom: 1rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 2px solid var(--ai-border);
-  }
-
-  .ai-summary-content :global(h4) {
-    color: var(--text-primary);
-    font-size: 1.1rem;
-    font-weight: 600;
-    margin-top: 1.5rem;
-    margin-bottom: 0.75rem;
-  }
-
-  .ai-summary-content :global(p) {
-    margin-bottom: 1rem;
-    color: var(--text-secondary);
-  }
-
-  .ai-summary-content :global(ul),
-  .ai-summary-content :global(ol) {
-    margin-bottom: 1rem;
-    padding-left: 1.5rem;
-  }
-
-  .ai-summary-content :global(li) {
-    margin-bottom: 0.5rem;
-    color: var(--text-secondary);
-  }
-
-  .ai-summary-content :global(b),
-  .ai-summary-content :global(strong) {
-    color: var(--text-primary);
-    font-weight: 600;
-  }
-
-  .ai-summary-content :global(em),
-  .ai-summary-content :global(i) {
-    font-style: italic;
-  }
-
   .results-divider {
     display: flex;
     align-items: center;
@@ -362,14 +235,6 @@
 
     .result-meta {
       margin-top: 0.5rem;
-    }
-
-    .ai-summary-header {
-      padding: 0.875rem 1rem;
-    }
-
-    .ai-summary-content {
-      padding: 1rem;
     }
   }
 </style>

@@ -116,7 +116,7 @@
   async function loadFiles(
     page: number = 1,
     limit: number = 25,
-    nameFilter: string = ""
+    nameFilter: string = "",
   ) {
     isLoadingFiles = true;
     filesError = null;
@@ -149,7 +149,7 @@
   }
 
   function handleFileNameFilterInput(
-    event: Event & { currentTarget: EventTarget & HTMLInputElement }
+    event: Event & { currentTarget: EventTarget & HTMLInputElement },
   ) {
     const filter = event.currentTarget.value;
     fileNameFilter.set(filter);
@@ -175,7 +175,7 @@
     fileId: number,
     pageNum: number,
     numPages: number,
-    fileName: string
+    fileName: string,
   ) {
     try {
       const blob = await fetchPage(fileId, pageNum);
@@ -246,7 +246,6 @@
   <SearchSection
     {searchQuery}
     {currentTab}
-    bind:useAI
     onsubmit={handleSearchSubmit}
     onTabSwitch={switchTab}
   />
@@ -264,7 +263,7 @@
             result.file_id,
             result.page_num,
             result.num_pages,
-            result.file_name
+            result.file_name,
           );
         }}
       />
@@ -282,8 +281,10 @@
           <select
             id="limit-select"
             value={pageLimit}
-            onchange={(e: { currentTarget: { value: number } }) =>
-              handleLimitChange(Number(e.currentTarget.value))}
+            onchange={(e: Event) =>
+              handleLimitChange(
+                Number((e.currentTarget as HTMLSelectElement).value),
+              )}
           >
             <option value={10}>10</option>
             <option value={25}>25</option>
