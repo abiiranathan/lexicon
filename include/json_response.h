@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 // Returns a malloc'd JSON string. Caller must free.
-char* json_create_error(const char* msg);
+char* json_create_error(const char* msg, size_t* outlen);
 
 // Returns a malloc'd JSON string. Caller must free.
 StrSlice json_create_page_response(int64_t file_id, int page_num, const char* text);

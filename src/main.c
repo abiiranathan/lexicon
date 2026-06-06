@@ -1,15 +1,12 @@
-#include <curl/curl.h>
 #include <pulsar/pulsar.h>
 #include <solidc/defer.h>
 #include <solidc/dotenv.h>
 #include <solidc/flags.h>
 #include <solidc/macros.h>
 
-#include "../include/cli.h"
 #include "../include/database.h"
+#include "../include/pdf_indexer.h"
 #include "../include/routes.h"
-
-#define INFO(msg) printf(">>> %s\n", msg);
 
 typedef struct {
     char* bind_addr;  // Address to bind to. Default is NULL (0.0.0.0)
@@ -21,15 +18,18 @@ typedef struct {
 } AppConfig;
 
 static AppConfig config = {.port = 8080, .min_pages = 4};
+FlagParser *root = NULL, *indexer = NULL;
+
+#define INFO(msg) printf(">>> %s\n", msg);
 
 // Checks for non-empty postgres connection string.
 void ensure_valid_pgconn_string() {
-    // Use config connection is passed.
-    if (config.pgconn) {
+    // Use config connection if passed.
+    if (config.pgconn != NULL) {
         return;
     }
 
-    // Fallback to environment variable PGCONN
+    // Fallback to environment variable PGCONN and fail if not dound.
     config.pgconn = getenv("PGCONN");
     if (config.pgconn == NULL) {
         puts("PGCONN environment variable must be set or pass --pgconn flag to the program");
@@ -38,16 +38,16 @@ void ensure_valid_pgconn_string() {
 }
 
 // Connect to database before invoking handler.
-static void pre_exec_func(void* user_data) {
+static void cli_pre_exec_handler(void* user_data) {
     AppConfig* c = user_data;
     ensure_valid_pgconn_string();
-    init_connections(c->pgconn);
+    create_connection_pool(c->pgconn);
     create_schema();
     puts("Connected to database and initialized schema");
 }
 
 // Handler for the index subcommand.
-static void build_index_handler(void* user_data) {
+static void cli_build_pdf_index(void* user_data) {
     AppConfig* appcfg = user_data;
     process_pdfs(appcfg->root_dir, appcfg->min_pages, appcfg->dryrun);
     exit(EXIT_SUCCESS);
@@ -55,22 +55,25 @@ static void build_index_handler(void* user_data) {
 
 // CORS middleware.
 void cors(PulsarCtx* ctx) {
-    /* Add CORS headers for cross-origin clients */
+    /* Add CORS headers for font-end during dev */
     static const char cors_headers[] =
         "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
         "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
     conn_writeheader_raw(ctx->conn, cors_headers, sizeof(cors_headers) - 1);
 }
 
-static void init() {
-    curl_global_init(0);
-    ASSERT(init_response_cache(1024, 300));
+void init() {
+    // Initialize a fast in-memory cache with 1024 default entries.
+    // Default TTL is 2 hours
+    if (!init_response_cache(1024, 2 * 60)) {
+        LOG_ERROR("failed to initialize in-memory cache");
+        exit(EXIT_FAILURE);
+    }
 }
 
-static void cleanup() {
+void cleanup() {
     close_connections();
     destroy_response_cache();
-    curl_global_cleanup();
 }
 
 int main(int argc, char* argv[]) {
@@ -80,33 +83,31 @@ int main(int argc, char* argv[]) {
     defer {
         cleanup();
     };
-
     ensure_valid_pgconn_string();
-
-    FlagParser* parser = flag_parser_new("lexicon", "Fast PDF indexer and server");
-    ASSERT(parser);
+    root = flag_parser_new("lexicon", "Fast PDF indexer and server");
     defer {
-        flag_parser_free(parser);
+        flag_parser_free(root);
     };
 
-    flag_int(parser, "port", 'p', "The server port", &config.port);
-    flag_string(parser, "addr", 'a', "Bind address", &config.bind_addr);
-    flag_string(parser, "pgconn", 'c', "Postgres connection URI", &config.pgconn);
+    // Global flags
+    flag_int(root, "port", 'p', "The server port", &config.port);
+    flag_string(root, "addr", 'a', "Bind address", &config.bind_addr);
+    flag_string(root, "pgconn", 'c', "Postgres connection URI", &config.pgconn);
 
-    FlagParser* index = flag_add_subcommand(parser, "index", "Build PDF index into the database",
-                                            build_index_handler);
-    flag_req_string(index, "root", 'r', "Root directory of pdfs", &config.root_dir);
-    flag_int(index, "min_pages", 'p', "Minimum number of pages in PDF to be indexed",
-             &config.min_pages);
-    flag_bool(index, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun);
+    // Index subcommand and its flags.
+    indexer = flag_add_subcommand(root, "index", "Build PDF index into the db", cli_build_pdf_index);
+    flag_req_string(indexer, "root", 'r', "Root directory of pdfs", &config.root_dir);
+    flag_int(indexer, "min_pages", 'p', "Minimum number of pages in PDF", &config.min_pages);
+    flag_bool(indexer, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun);
 
-    flag_set_pre_invoke(parser, pre_exec_func);
+    // Before the matching subcommand runs, we need to connect to the database.
+    flag_set_pre_invoke(root, cli_pre_exec_handler);
 
     // Set the server config as user-data for all handlers.
-    FlagStatus status = flag_parse_and_invoke(parser, argc, argv, &config);
+    FlagStatus status = flag_parse_and_invoke(root, argc, argv, &config);
     if (status != FLAG_OK) {
         fprintf(stderr, "ERROR: %s\n", flag_status_str(status));
-        flag_print_usage(parser);
+        flag_print_usage(root);
         exit(EXIT_FAILURE);
     }
 

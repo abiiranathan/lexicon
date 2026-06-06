@@ -569,12 +569,14 @@ bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height,
     UNLOCK_CAIRO_MUTEX();
 
     // Initialize gzip compression context
-    cairo_gzip_write_context_t write_ctx = {.stream         = {0},
-                                            .data           = NULL,
-                                            .size           = 0,
-                                            .capacity       = 0,
-                                            .initialized    = false,
-                                            .error_occurred = false};
+    cairo_gzip_write_context_t write_ctx = {
+        .stream         = {0},
+        .data           = NULL,
+        .size           = 0,
+        .capacity       = 0,
+        .initialized    = false,
+        .error_occurred = false,
+    };
 
     // Write PNG to compressed buffer via streaming callback
     cairo_status_t status =
@@ -603,7 +605,6 @@ bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height,
     // Transfer ownership to caller
     out_buffer->data = write_ctx.data;
     out_buffer->size = write_ctx.size;
-    printf("Sending buffer of size: %zu\n", out_buffer->size);
     return true;
 }
 
@@ -673,18 +674,10 @@ bool get_pdf_metadata(const char* filename, pdf_metadata_t* out_meta) {
     }
 
     // Basic Integer/Boolean properties
-    out_meta->page_count = num_pages;
-    // Note: poppler_document_get_pdf_version_string returns a const char* owned by doc
-    const char* ver_str   = poppler_document_get_pdf_version_string(doc);
-    out_meta->pdf_version = ver_str ? strdup(ver_str) : NULL;
-
-    // Newer Poppler versions might strictly require a password check for encryption status,
-    // but usually, if it opened without error (and without password), it's decrypted.
-    // This call checks if the underlying file structure implies encryption.
-    // (Note: Poppler's API for encryption checking varies by version, this is a safe check).
-    // Assuming the document opened successfully in open_document:
-    out_meta->is_encrypted =
-        FALSE;  // If we opened it without password prompt logic, it's accessible.
+    out_meta->page_count   = num_pages;
+    const char* ver_str    = poppler_document_get_pdf_version_string(doc);
+    out_meta->pdf_version  = ver_str ? strdup(ver_str) : NULL;
+    out_meta->is_encrypted = FALSE;
 
     // String Properties
     out_meta->title    = poppler_document_get_title(doc);

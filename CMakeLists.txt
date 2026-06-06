@@ -15,9 +15,9 @@ pkg_check_modules(POPPLER_GLIB REQUIRED poppler-glib)
 # The executable needs ./ui/dist svelte frontend served at / route.
 # Build with: `cd ui` && `npm run build`
 add_executable(${PROJECT_NAME} 
-    src/lexicon.c 
+    src/main.c 
     src/routes.c 
-    src/cli.c 
+    src/pdf_indexer.c
     src/pdf.c 
     src/pdf_preprocess.c
     src/database.c
@@ -26,13 +26,12 @@ add_executable(${PROJECT_NAME}
 
 # All dependencies from abiiranathan can be built from source with cmake
 target_link_libraries(${PROJECT_NAME} PRIVATE 
-    pgpool # github.com/abiiranathan/pgpool
-    solidc # github.com/abiiranathan/solidc
-    pulsar # github.com/abiiranathan/pulsar
-    yyjson # https://github.com/ibireme/yyjson
+    pgpool # github.com/abiiranathan/pgpool     (libpq connection pool library)
+    solidc # github.com/abiiranathan/solidc     (Cross-platform C utilities and DS)
+    pulsar # github.com/abiiranathan/pulsar     (Robust epoll-based web server)
+    yyjson # https://github.com/ibireme/yyjson  (Json serializer and parser)
     m      # math library
     z      # zlib
-    curl   # libcurl
     ${POPPLER_GLIB_LIBRARIES}
     ${PostgreSQL_LIBRARIES}
     gio-2.0

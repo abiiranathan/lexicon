@@ -9,7 +9,7 @@
 extern pgpool_t* pool;
 
 // Connection to database and init connection pool.
-void init_connections(const char* conn_string);
+void create_connection_pool(const char* conn_string);
 
 // Create all table schema.
 void create_schema();

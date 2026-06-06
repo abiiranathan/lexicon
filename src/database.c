@@ -91,30 +91,31 @@ static const char* schemas[] = {
 // Exported so that callers can access it.
 pgpool_t* pool = NULL;
 
-void init_connections(const char* conn_string) {
+// Create and initialialize the connection pool.
+void create_connection_pool(const char* conn_string) {
     pgpool_config_t cfg = {
-        .conninfo        = conn_string,  // Connection string
-        .auto_reconnect  = true,         // Auto reconnect of failure
+        .conninfo        = conn_string,
+        .auto_reconnect  = true,
         .min_connections = 10,
         .max_connections = 20,
-        .connect_timeout = 5000,
+        .connect_timeout = 10,
     };
     pool = pgpool_create(&cfg);
     ASSERT(pool != NULL && "connection pool creation failed");
 }
 
+// Destroys a connection pool and releases all resources.
 void close_connections(void) {
-    if (pool) {
-        pgpool_destroy(pool, 5000);
-    }
+    if (pool) pgpool_destroy(pool, 5000);
 }
 
+// Create all the table schema and partitions, RUM extension and associated INDEXES.
 void create_schema() {
     pgconn_t* conn = pgpool_acquire(pool, 1000);
     ASSERT(conn && "failed to acquired connection from pool");
 
     for (size_t i = 0; i < NUM_SCHEMA; ++i) {
-        if (!pgpool_execute(conn, schemas[i], 1000)) {
+        if (!pgpool_execute(conn, schemas[i], 5000)) {
             fprintf(stderr, "%s\n", pgpool_error_message(conn));
             close_connections();
             exit(EXIT_FAILURE);

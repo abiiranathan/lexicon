@@ -98,7 +98,7 @@ bool init_response_cache(size_t capacity, uint32_t ttl_seconds) {
  * Safe to call even if init_response_cache() was never called.
  */
 void destroy_response_cache(void) {
-    cache_destroy(g_res_cache);
+    if (g_res_cache) cache_destroy(g_res_cache);
     g_res_cache = NULL;
 }
 
@@ -113,12 +113,13 @@ void destroy_response_cache(void) {
  * @param msg  Human-readable error message; must be NUL-terminated.
  */
 static inline void send_json_error(PulsarConn* conn, const char* msg) {
-    char* str = json_create_error(msg);
-    if (str) {
-        conn_send_json(conn, StatusBadRequest, str, strlen(str));
-        free(str);
+    size_t outlen;
+    char* err_str = json_create_error(msg, &outlen);
+    if (err_str) {
+        conn_send_json(conn, StatusBadRequest, err_str, outlen);
+        free(err_str);
     } else {
-        conn_send(conn, StatusInternalServerError, "{\"error\":\"Internal error\"}", 26);
+        conn_send_json(conn, StatusInternalServerError, "{\"error\":\"Internal error\"}", 26);
     }
 }
 
@@ -354,8 +355,7 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
 void pdf_search(PulsarCtx* ctx) {
     ASSERT(g_res_cache);
 
-    PulsarConn* conn = ctx->conn;
-
+    PulsarConn* conn      = ctx->conn;
     StrSlice slice_query  = query_get(conn, "q");
     StrSlice slice_fileid = query_get(conn, "file_id");
 

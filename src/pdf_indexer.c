@@ -1,7 +1,7 @@
-#include "../include/cli.h"
+#include "../include/pdf_indexer.h"
 #include "../include/pdf_preprocess.h"
 
-#include <inttypes.h>  // for PRId64
+#include <inttypes.h>
 #include <poppler/glib/poppler.h>
 #include <solidc/defer.h>
 #include <solidc/threadpool.h>
@@ -11,9 +11,11 @@
 static const char* file_insert_query =
     "INSERT INTO files(name, path, num_pages) VALUES($1, $2, $3) ON CONFLICT(name, path) DO UPDATE "
     "SET num_pages = EXCLUDED.num_pages RETURNING id";
+
 static const char* page_insert_query =
     "INSERT INTO pages(file_id, page_num, text) VALUES($1, $2, $3) ON CONFLICT (file_id, page_num) "
     "DO NOTHING";
+
 static const char* file_id_query = "SELECT id FROM files WHERE path = $1";
 
 /**
@@ -73,7 +75,6 @@ typedef struct {
 static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char* name, int npages,
                               pgconn_t* conn) {
     bool all_ok = true;
-
     for (int page_num = 0; page_num < npages; page_num++) {
         PopplerPage* page = poppler_document_get_page(doc, page_num);
         if (!page) {
@@ -86,8 +87,8 @@ static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char*
         char* text = poppler_page_get_text(page);
         defer_free(text);
 
+        // Empty page — not an error, just nothing to index.
         if (!text || text[0] == '\0') {
-            // Empty page — not an error, just nothing to index.
             continue;
         }
 
@@ -114,23 +115,23 @@ static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char*
         // state and rejects every subsequent command until a ROLLBACK. Rolling
         // back to the savepoint clears that state while keeping the rest of
         // the transaction intact so we can continue processing remaining pages.
-        if (!pgpool_execute_params(conn, "SAVEPOINT page_insert", 0, NULL, -1)) {
+        if (!pgpool_execute(conn, "SAVEPOINT page_insert", 5000)) {
             fprintf(stderr, ">>> Failed to set SAVEPOINT for page %d of %s: %s\n", page_num + 1,
                     name, pgpool_error_message(conn));
             all_ok = false;
             continue;
         }
 
-        if (!pgpool_execute_params(conn, page_insert_query, 3, values, -1)) {
+        if (!pgpool_execute_params(conn, page_insert_query, 3, values, 5000)) {
             fprintf(stderr, ">>> Failed to insert page %d of %s: %s\n", page_num + 1, name,
                     pgpool_error_message(conn));
 
             // Clear the aborted-transaction state before the next iteration.
-            pgpool_execute_params(conn, "ROLLBACK TO SAVEPOINT page_insert", 0, NULL, -1);
+            pgpool_execute(conn, "ROLLBACK TO SAVEPOINT page_insert", 5000);
             all_ok = false;
         } else {
             // Release the savepoint to free the server-side snapshot it holds.
-            pgpool_execute_params(conn, "RELEASE SAVEPOINT page_insert", 0, NULL, -1);
+            pgpool_execute(conn, "RELEASE SAVEPOINT page_insert", 5000);
         }
     }
 
@@ -224,7 +225,7 @@ static void process_pdf_task(void* arg) {
     if (!res) {
         fprintf(stderr, ">>> Failed to insert file record for %s: %s\n", params->path,
                 pgpool_error_message(conn));
-        pgpool_rollback(conn, 1000);
+        pgpool_rollback(conn, 2000);
         atomic_store(params->success, false);
         return;
     }
@@ -238,19 +239,19 @@ static void process_pdf_task(void* arg) {
         PQclear(res);
     } else {
         PQclear(res);
-
         const char* path_param[] = {params->path};
-        PGresult* id_res         = pgpool_query_params(conn, file_id_query, 1, path_param, -1);
-        if (!id_res || PQntuples(id_res) == 0) {
+
+        res = pgpool_query_params(conn, file_id_query, 1, path_param, -1);
+        if (!res || PQntuples(res) == 0) {
             fprintf(stderr, ">>> Could not retrieve file_id for %s\n", params->path);
-            if (id_res) PQclear(id_res);
+            if (res) PQclear(res);
             pgpool_rollback(conn, 1000);
             atomic_store(params->success, false);
             return;
         }
 
-        file_id = atoll(PQgetvalue(id_res, 0, 0));
-        PQclear(id_res);
+        file_id = atoll(PQgetvalue(res, 0, 0));
+        PQclear(res);
     }
 
     // --- INSERT all pages within the same transaction ---

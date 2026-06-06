@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     pkg-config \
     libpq-dev \
-    libcurl4-openssl-dev \
     libxxhash-dev \
     libpoppler-glib-dev \
     libglib2.0-dev \
@@ -44,15 +43,15 @@ RUN git clone --depth 1 https://github.com/abiiranathan/solidc.git && \
     cmake --install build && \
     cd .. && rm -rf solidc
 
-# pgconn
-RUN git clone --depth 1 https://github.com/abiiranathan/pgconn.git && \
-    cd pgconn && \
+# pgpool
+RUN git clone --depth 1 https://github.com/abiiranathan/pgpool.git && \
+    cd pgpool && \
     cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=/usr/bin/gcc-15 \
           -DCMAKE_CXX_COMPILER=/usr/bin/g++-15 && \
     cmake --build build && \
     cmake --install build && \
-    cd .. && rm -rf pgconn
+    cd .. && rm -rf pgpool
 
 # pulsar
 RUN git clone --depth 1 https://github.com/abiiranathan/pulsar.git && \
@@ -95,7 +94,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libcairo2 \
     zlib1g \
-    libcurl4-openssl-dev \
     ca-certificates \
     wget \
     && rm -rf /var/lib/apt/lists/*

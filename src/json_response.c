@@ -18,13 +18,13 @@ static char* serialize_doc(yyjson_mut_doc* doc, size_t* out_len) {
     return json_str;
 }
 
-char* json_create_error(const char* msg) {
+char* json_create_error(const char* msg, size_t* outlen) {
     yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
     yyjson_mut_obj_add_str(doc, root, "error", msg ? msg : "Unknown error");
-    return serialize_doc(doc, NULL);
+    return serialize_doc(doc, outlen);
 }
 
 StrSlice json_create_page_response(int64_t file_id, int page_num, const char* text) {
