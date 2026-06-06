@@ -20,7 +20,15 @@ typedef struct {
 static AppConfig config = {.port = 8080, .min_pages = 4};
 FlagParser *root = NULL, *indexer = NULL;
 
-#define INFO(msg) printf(">>> %s\n", msg);
+// Register defer macros for cleanup.
+#define defer_cleanup() \
+    defer {             \
+        cleanup();      \
+    };
+#define defer_parser_free(p) \
+    defer {                  \
+        flag_parser_free(p); \
+    };
 
 // Checks for non-empty postgres connection string.
 void ensure_valid_pgconn_string() {
@@ -62,7 +70,7 @@ void cors(PulsarCtx* ctx) {
     conn_writeheader_raw(ctx->conn, cors_headers, sizeof(cors_headers) - 1);
 }
 
-void init() {
+void init_app() {
     // Initialize a fast in-memory cache with 1024 default entries.
     // Default TTL is 2 hours
     if (!init_response_cache(1024, 2 * 60)) {
@@ -79,15 +87,12 @@ void cleanup() {
 int main(int argc, char* argv[]) {
     // Load .env if exists
     load_dotenv(".env");
-    init();
-    defer {
-        cleanup();
-    };
+    init_app();
+    defer_cleanup();
+
     ensure_valid_pgconn_string();
     root = flag_parser_new("lexicon", "Fast PDF indexer and server");
-    defer {
-        flag_parser_free(root);
-    };
+    defer_parser_free(root);
 
     // Global flags
     flag_int(root, "port", 'p', "The server port", &config.port);
@@ -124,8 +129,9 @@ int main(int argc, char* argv[]) {
     route_static("/", "./ui/dist");
     pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
 
-    Middleware mw[] = {cors};
-    use_global_middleware(mw, sizeof(mw) / sizeof(mw[0]));
+    // Attach CORS middleware globally.
+    Middleware mw[1] = {cors};
+    use_global_middleware(mw, ARRAY_SIZE(mw));
 
     int code = pulsar_run(config.bind_addr, config.port);
     printf("Server exited with status code: %d\n", code);
