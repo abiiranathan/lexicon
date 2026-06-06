@@ -8,18 +8,16 @@
 
 // Helper to serialize and return string
 static char* serialize_doc(yyjson_mut_doc* doc, size_t* out_len) {
-    size_t len     = 0;
+    size_t len = 0;
     char* json_str = yyjson_mut_write(doc, 0, &len);
     yyjson_mut_doc_free(doc);
 
-    if (out_len) {
-        *out_len = len;
-    }
+    if (out_len) { *out_len = len; }
     return json_str;
 }
 
 char* json_create_error(const char* msg, size_t* outlen) {
-    yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -28,7 +26,7 @@ char* json_create_error(const char* msg, size_t* outlen) {
 }
 
 StrSlice json_create_page_response(int64_t file_id, int page_num, const char* text) {
-    yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -37,13 +35,12 @@ StrSlice json_create_page_response(int64_t file_id, int page_num, const char* te
     yyjson_mut_obj_add_str(doc, root, "text", text ? text : "");
 
     size_t out_len = 0;
-    char* data     = serialize_doc(doc, &out_len);
+    char* data = serialize_doc(doc, &out_len);
     return ss_from(data, out_len);
 }
 
-char* json_create_file_response(int64_t id, const char* name, const char* path, int64_t num_pages,
-                                size_t* out_len) {
-    yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
+char* json_create_file_response(int64_t id, const char* name, const char* path, int64_t num_pages, size_t* out_len) {
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -55,9 +52,8 @@ char* json_create_file_response(int64_t id, const char* name, const char* path, 
     return serialize_doc(doc, out_len);
 }
 
-char* json_create_file_list(PGresult* res, int page, int limit, int64_t total_count,
-                            size_t* out_len) {
-    yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
+char* json_create_file_list(PGresult* res, int page, int limit, int64_t total_count, size_t* out_len) {
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -67,14 +63,14 @@ char* json_create_file_list(PGresult* res, int page, int limit, int64_t total_co
     int ntuples = PQntuples(res);
     for (int i = 0; i < ntuples; i++) {
         // Columns based on: SELECT id, name, path, num_pages ...
-        const char* file_id_str   = PQgetvalue(res, i, 0);
-        const char* file_name     = PQgetvalue(res, i, 1);
-        const char* file_path     = PQgetvalue(res, i, 2);
+        const char* file_id_str = PQgetvalue(res, i, 0);
+        const char* file_name = PQgetvalue(res, i, 1);
+        const char* file_path = PQgetvalue(res, i, 2);
         const char* num_pages_str = PQgetvalue(res, i, 3);
 
         if (!file_id_str || !file_name || !file_path || !num_pages_str) continue;
 
-        int64_t file_id   = strtoll(file_id_str, NULL, 10);
+        int64_t file_id = strtoll(file_id_str, NULL, 10);
         int64_t num_pages = strtoll(num_pages_str, NULL, 10);
 
         yyjson_mut_val* result_obj = yyjson_mut_obj(doc);
@@ -101,7 +97,7 @@ char* json_create_file_list(PGresult* res, int page, int limit, int64_t total_co
 }
 
 char* json_create_search_results(PGresult* res, const char* query, size_t* out_len) {
-    yyjson_mut_doc* doc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -121,7 +117,7 @@ char* json_create_search_results(PGresult* res, const char* query, size_t* out_l
         if (!valid) continue;
 
         const char* file_name = PQgetvalue(res, i, 1);
-        const char* snippet   = PQgetvalue(res, i, 4);
+        const char* snippet = PQgetvalue(res, i, 4);
 
         yyjson_mut_val* result_obj = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_int(doc, result_obj, "file_id", file_id);

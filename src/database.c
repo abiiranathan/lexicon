@@ -94,8 +94,8 @@ pgpool_t* pool = NULL;
 // Create and initialialize the connection pool.
 void create_connection_pool(const char* conn_string) {
     pgpool_config_t cfg = {
-        .conninfo        = conn_string,
-        .auto_reconnect  = true,
+        .conninfo = conn_string,
+        .auto_reconnect = true,
         .min_connections = 10,
         .max_connections = 20,
         .connect_timeout = 10,

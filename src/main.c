@@ -20,22 +20,10 @@ typedef struct {
 static AppConfig config = {.port = 8080, .min_pages = 4};
 FlagParser *root = NULL, *indexer = NULL;
 
-// Register defer macros for cleanup.
-#define defer_cleanup() \
-    defer {             \
-        cleanup();      \
-    };
-#define defer_parser_free(p) \
-    defer {                  \
-        flag_parser_free(p); \
-    };
-
 // Checks for non-empty postgres connection string.
 void ensure_valid_pgconn_string() {
     // Use config connection if passed.
-    if (config.pgconn != NULL) {
-        return;
-    }
+    if (config.pgconn != NULL) return;
 
     // Fallback to environment variable PGCONN and fail if not dound.
     config.pgconn = getenv("PGCONN");
@@ -64,9 +52,9 @@ static void cli_build_pdf_index(void* user_data) {
 // CORS middleware.
 void cors(PulsarCtx* ctx) {
     /* Add CORS headers for font-end during dev */
-    static const char cors_headers[] =
-        "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
-        "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
+    static const char cors_headers
+        [] = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
+             "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
     conn_writeheader_raw(ctx->conn, cors_headers, sizeof(cors_headers) - 1);
 }
 
@@ -88,11 +76,11 @@ int main(int argc, char* argv[]) {
     // Load .env if exists
     load_dotenv(".env");
     init_app();
-    defer_cleanup();
+    defer_call(cleanup);
 
     ensure_valid_pgconn_string();
     root = flag_parser_new("lexicon", "Fast PDF indexer and server");
-    defer_parser_free(root);
+    defer_call1(flag_parser_free, root);
 
     // Global flags
     flag_int(root, "port", 'p', "The server port", &config.port);

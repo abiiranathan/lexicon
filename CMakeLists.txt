@@ -35,6 +35,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${POPPLER_GLIB_LIBRARIES}
     ${PostgreSQL_LIBRARIES}
     gio-2.0
+    pcre2-8
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -43,8 +44,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_compile_options(${PROJECT_NAME} PRIVATE
-    ${POPPLER_GLIB_CFLAGS_OTHER}
+    ${POPPLER_GLIB_CFLAGS_OTHER} -Wno-gnu-designator
 )
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE DEFER_AUTOFREE)
 
 # Enable LTO for Release builds
 if(CMAKE_BUILD_TYPE MATCHES "Release")

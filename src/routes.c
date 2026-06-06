@@ -42,7 +42,7 @@
  */
 #define CACHE_HIT_RETURN(cache_, key_, key_len_, conn_)                              \
     do {                                                                             \
-        size_t _cached_len  = 0;                                                     \
+        size_t _cached_len = 0;                                                      \
         const char* _cached = cache_get((cache_), (key_), (key_len_), &_cached_len); \
         if (_cached) {                                                               \
             send_cache_json((conn_), _cached, _cached_len);                          \
@@ -59,7 +59,8 @@
  * @param key_     NUL-terminated cache key.
  * @param key_len_ Length of the key in bytes.
  * @param conn_    PulsarConn* to write the response to.
- * @param json_str_ Heap-allocated JSON string (caller-owned; freed by this macro).
+ * @param json_str_ Heap-allocated JSON string (caller-owned; freed by this
+ * macro).
  * @param json_len_ Length of the JSON payload in bytes.
  * @param ttl_     TTL in seconds (0 = use cache default).
  */
@@ -70,16 +71,31 @@
         free((char*)(json_str_));                                                            \
     } while (0)
 
+#define HANDLE_RECORD_NOT_FOUND(res, conn, errmsg) \
+    if (PQntuples(res) == 0) {                     \
+        conn_set_status(conn, StatusNotFound);     \
+        send_json_error(conn, errmsg);             \
+        return;                                    \
+    }
+
+#define HANDLE_QUERY_ERROR(res, conn)                    \
+    if (!(res)) {                                        \
+        send_json_error(conn, pgpool_error_message(db)); \
+        return;                                          \
+    }
+
 /* ---------------------------------------------------------------------------
  * Module-level state
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 
 /** Global response cache shared across all route handlers. */
 static cache_t* g_res_cache = NULL;
 
 /* ---------------------------------------------------------------------------
  * Lifecycle
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 
 /**
  * Initialises the global response cache.
@@ -104,7 +120,8 @@ void destroy_response_cache(void) {
 
 /* ---------------------------------------------------------------------------
  * Internal helpers
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 
 /**
  * Sends a JSON-encoded error body with HTTP 400 Bad Request.
@@ -145,19 +162,20 @@ static inline void send_cache_json(PulsarConn* conn, const char* data, size_t le
  * @param buffer      Output buffer to write the NUL-terminated key into.
  * @param buffer_size Capacity of @p buffer in bytes.
  * @param file_id     Database file identifier.
- * @param page_num    Page number (1-based), or a negative value for file-level keys.
- * @return Number of bytes written, excluding the NUL terminator (à la snprintf).
+ * @param page_num    Page number (1-based), or a negative value for file-level
+ * keys.
+ * @return Number of bytes written, excluding the NUL terminator (à la
+ * snprintf).
  */
 static inline int cache_make_key(char* buffer, size_t buffer_size, int64_t file_id, int page_num) {
-    if (page_num >= 0) {
-        return snprintf(buffer, buffer_size, "file:%lld:page:%d", (long long)file_id, page_num);
-    }
+    if (page_num >= 0) { return snprintf(buffer, buffer_size, "file:%lld:page:%d", (long long)file_id, page_num); }
     return snprintf(buffer, buffer_size, "file:%lld", (long long)file_id);
 }
 
 /* ---------------------------------------------------------------------------
  * Route handlers
- * --------------------------------------------------------------------------- */
+ * ---------------------------------------------------------------------------
+ */
 
 /**
  * GET /files/:file_id/pages/:page_num
@@ -173,10 +191,10 @@ static inline int cache_make_key(char* buffer, size_t buffer_size, int64_t file_
 void get_page_by_file_and_page(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
 
-    const char* file_id_str  = get_path_param(conn, "file_id");
+    const char* file_id_str = get_path_param(conn, "file_id");
     const char* page_num_str = get_path_param(conn, "page_num");
 
-    int64_t file_id  = 0;
+    int64_t file_id = 0;
     int64_t page_num = 0;
     str_to_i64(file_id_str, &file_id);
     str_to_i64(page_num_str, &page_num);
@@ -186,24 +204,15 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
     CACHE_HIT_RETURN(g_res_cache, cache_key, (size_t)key_len, conn);
 
     static const char* query = "SELECT text FROM pages WHERE file_id=$1 AND page_num=$2 LIMIT 1";
-    const char* params[]     = {file_id_str, page_num_str};
+    const char* params[] = {file_id_str, page_num_str};
 
     ACQUIRE_DB(db);
     PGresult* res = pgpool_query_params(db, query, 2, params, -1);
     defer_pqclear(res);
+    HANDLE_QUERY_ERROR(res, conn);
+    HANDLE_RECORD_NOT_FOUND(res, conn, "No page found for the requested file and page number");
 
-    if (!res) {
-        send_json_error(conn, pgpool_error_message(db));
-        return;
-    }
-
-    if (PQntuples(res) == 0) {
-        conn_set_status(conn, StatusNotFound);
-        send_json_error(conn, "No page found for the requested file and page number");
-        return;
-    }
-
-    const char* text  = PQgetvalue(res, 0, 0);
+    const char* text = PQgetvalue(res, 0, 0);
     StrSlice response = json_create_page_response(file_id, (int)page_num, text);
     if (!ss_is_valid(response)) {
         send_json_error(conn, "Failed to serialize JSON");
@@ -238,9 +247,7 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     require_path_param(page_num_str, conn, "page_num");
 
     StrSlice type = query_get(conn, "type");
-    if (ss_is_empty(type)) {
-        type = SS_LIT("png");
-    }
+    if (ss_is_empty(type)) type = SS_LIT("png");
 
     const StrSlice type_png = SS_LIT("png");
     const StrSlice type_pdf = SS_LIT("pdf");
@@ -251,39 +258,33 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     }
 
     int64_t file_id = 0;
-    int page_num    = 0;
+    int page_num = 0;
 
     if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
         send_json_error(conn, "Invalid file ID: must be a valid integer");
         return;
     }
+
     if (str_to_int(page_num_str, &page_num) != STO_SUCCESS) {
         send_json_error(conn, "Invalid page number: must be a valid integer");
         return;
     }
 
     /* NUL-terminate the type slice before embedding it in the cache key. */
-    char* type_cstr = ss_to_owned_cstr(type);
-    if (!type_cstr) {
-        send_json_error(conn, "Internal error");
-        return;
-    }
-    defer {
-        free(type_cstr);
-    };
+    autofree char* type_cstr = ss_to_owned_cstr(type);
+    abort_if_nullptr(type_cstr, conn, "malloc failed for type query");
 
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
-    size_t key_len =
-        (size_t)snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d:type:%s",
-                         (long long)file_id, page_num, type_cstr);
+    size_t key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d:type:%s",
+                                      (long long)file_id, page_num, type_cstr);
 
-    static const char png_headers[] =
-        "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
-    static const char pdf_headers[] =
-        "Content-Type: application/pdf\r\nCache-Control: public, max-age=3600\r\n";
+    static const char png_headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
+    static const char pdf_headers
+        [] = "Content-Type: application/pdf\r\nCache-Control: public, "
+             "max-age=3600\r\n";
 
     /* Serve from cache if available. */
-    size_t cached_len       = 0;
+    size_t cached_len = 0;
     const char* cached_data = cache_get(g_res_cache, cache_key, key_len, &cached_len);
     if (cached_data) {
         const char* hdrs = ss_equal(type, type_png) ? png_headers : pdf_headers;
@@ -294,38 +295,30 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     }
 
     static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
-    const char* params[]     = {file_id_str};
+    const char* params[] = {file_id_str};
 
     ACQUIRE_DB(db);
     PGresult* res = pgpool_query_params(db, query, 1, params, -1);
     defer_pqclear(res);
 
-    if (!res) {
-        send_json_error(conn, pgpool_error_message(db));
-        return;
-    }
-
-    if (PQntuples(res) == 0) {
-        conn_set_status(conn, StatusNotFound);
-        send_json_error(conn, "No file found for the requested file");
-        return;
-    }
+    HANDLE_QUERY_ERROR(res, conn);
+    HANDLE_RECORD_NOT_FOUND(res, conn, "No file found for the requested file");
 
     if (page_num < 1) {
         send_json_error(conn, "Page out of range");
         return;
     }
 
-    const char* path        = PQgetvalue(res, 0, 0);
+    const char* path = PQgetvalue(res, 0, 0);
     PageRenderFunc renderer = NULL;
-    const char* hdrs        = NULL;
+    const char* hdrs = NULL;
 
     if (ss_equal(type, type_png)) {
         renderer = render_page_from_document_to_buffer;
-        hdrs     = png_headers;
+        hdrs = png_headers;
     } else {
         renderer = render_page_from_document_to_pdf_buffer;
-        hdrs     = pdf_headers;
+        hdrs = pdf_headers;
     }
 
     pdf_buffer_t byte_buf = {0};
@@ -353,32 +346,15 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
  *   file_id - Restrict results to this file ID (optional).
  */
 void pdf_search(PulsarCtx* ctx) {
-    ASSERT(g_res_cache);
-
-    PulsarConn* conn      = ctx->conn;
-    StrSlice slice_query  = query_get(conn, "q");
+    PulsarConn* conn = ctx->conn;
     StrSlice slice_fileid = query_get(conn, "file_id");
+    require_query_alloc(query_cstr, conn, "q");
 
-    if (ss_is_empty(slice_query)) {
-        send_json_error(conn, "Missing search query");
-        return;
-    }
-
-    /*
-     * Both the query and the optional file_id come from StrSlice values that
-     * may point into an unparsed request buffer without a guaranteed NUL
-     * terminator.  Promote them to owned C strings before passing to snprintf,
-     * libpq, and json_create_search_results.
-     */
-    char* query_cstr = ss_to_owned_cstr(slice_query);
-    if (!query_cstr) {
-        send_json_error(conn, "Internal error");
-        return;
-    }
-    defer_free(query_cstr);
-
-    char* fileid_cstr = !ss_is_empty(slice_fileid) ? ss_to_owned_cstr(slice_fileid) : NULL;
-    defer_free(fileid_cstr);
+    autofree char* fileid_cstr = NULL;
+    if (!ss_is_empty(slice_fileid)) {
+        fileid_cstr = ss_to_owned_cstr(slice_fileid);
+        abort_if_nullptr(fileid_cstr, conn, "memory alloc failed");
+    };
 
     /* Build the cache key from the NUL-terminated copies. */
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
@@ -390,58 +366,58 @@ void pdf_search(PulsarCtx* ctx) {
     /* Build the parameterised SQL query. */
     const char* params[2];
     int param_count = 1;
-    params[0]       = query_cstr;
+    params[0] = query_cstr;
 
     if (fileid_cstr) {
-        params[1]   = fileid_cstr;
+        params[1] = fileid_cstr;
         param_count = 2;
     }
 
     /*
-     * Common table expression shared by both query variants.  The caller
-     * appends either a file-scoped or global suffix depending on whether
-     * file_id was supplied.
-     */
-    static const char common_cte[] =
-        "WITH input_queries AS ("
-        "  SELECT"
-        "    websearch_to_tsquery('english', $1) AS broad_query,"
-        "    phraseto_tsquery('english', $1)     AS phrase_query"
-        "),"
-        "RankedPages AS ("
-        "  SELECT"
-        "    p.file_id, p.page_num,"
-        "    ("
-        "      ts_rank_cd(p.text_vector, inputs.broad_query)"
-        "      + (CASE WHEN p.text_vector @@ inputs.phrase_query THEN 10.0 ELSE 0.0 END)"
-        "    ) AS rank"
-        "  FROM pages p"
-        "  CROSS JOIN input_queries inputs"
-        "  WHERE p.text_vector @@ inputs.broad_query";
+   * Common table expression shared by both query variants.  The caller
+   * appends either a file-scoped or global suffix depending on whether
+   * file_id was supplied.
+   */
+    static const char common_cte
+        [] = "WITH input_queries AS ("
+             "  SELECT"
+             "    websearch_to_tsquery('english', $1) AS broad_query,"
+             "    phraseto_tsquery('english', $1)     AS phrase_query"
+             "),"
+             "RankedPages AS ("
+             "  SELECT"
+             "    p.file_id, p.page_num,"
+             "    ("
+             "      ts_rank_cd(p.text_vector, inputs.broad_query)"
+             "      + (CASE WHEN p.text_vector @@ inputs.phrase_query THEN 10.0 ELSE "
+             "0.0 END)"
+             "    ) AS rank"
+             "  FROM pages p"
+             "  CROSS JOIN input_queries inputs"
+             "  WHERE p.text_vector @@ inputs.broad_query";
 
-    static const char query_suffix[] =
-        "  ORDER BY rank DESC LIMIT 100"
-        "),"
-        "UniquePages AS ("
-        "  SELECT DISTINCT ON (file_id, page_num) file_id, page_num, rank"
-        "  FROM RankedPages ORDER BY file_id, page_num, rank DESC"
-        ")"
-        "SELECT"
-        "  u.file_id, f.name, f.num_pages, u.page_num,"
-        "  ts_headline('english', p.text, inputs.broad_query,"
-        "    'StartSel=<b>, StopSel=</b>, MaxWords=200, MinWords=20') AS snippet,"
-        "  LEFT(p.text, 2000) AS extended_snippet,"
-        "  u.rank"
-        " FROM UniquePages u"
-        " CROSS JOIN input_queries inputs"
-        " JOIN files f ON u.file_id = f.id"
-        " JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num"
-        " ORDER BY u.rank DESC, f.name, u.page_num LIMIT 100";
+    static const char query_suffix
+        [] = "  ORDER BY rank DESC LIMIT 100"
+             "),"
+             "UniquePages AS ("
+             "  SELECT DISTINCT ON (file_id, page_num) file_id, page_num, rank"
+             "  FROM RankedPages ORDER BY file_id, page_num, rank DESC"
+             ")"
+             "SELECT"
+             "  u.file_id, f.name, f.num_pages, u.page_num,"
+             "  ts_headline('english', p.text, inputs.broad_query,"
+             "    'StartSel=<b>, StopSel=</b>, MaxWords=200, MinWords=20') AS snippet,"
+             "  LEFT(p.text, 2000) AS extended_snippet,"
+             "  u.rank"
+             " FROM UniquePages u"
+             " CROSS JOIN input_queries inputs"
+             " JOIN files f ON u.file_id = f.id"
+             " JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num"
+             " ORDER BY u.rank DESC, f.name, u.page_num LIMIT 100";
 
     char full_query[4096];
     if (fileid_cstr) {
-        snprintf(full_query, sizeof(full_query), "%s AND p.file_id = $2 %s", common_cte,
-                 query_suffix);
+        snprintf(full_query, sizeof(full_query), "%s AND p.file_id = $2 %s", common_cte, query_suffix);
     } else {
         snprintf(full_query, sizeof(full_query), "%s %s", common_cte, query_suffix);
     }
@@ -452,13 +428,10 @@ void pdf_search(PulsarCtx* ctx) {
     TIME_BLOCK("pdfsearch", { res = pgpool_query_params(db, full_query, param_count, params, -1); });
     defer_pqclear(res);
 
-    if (!res) {
-        send_json_error(conn, pgpool_error_message(db));
-        return;
-    }
+    HANDLE_QUERY_ERROR(res, conn);
 
     size_t jsonlen = 0;
-    char* json_str = json_create_search_results(res, query_cstr, &jsonlen);
+    DEFER_VAR char* json_str = json_create_search_results(res, query_cstr, &jsonlen);
     defer_free(json_str);
 
     conn_send_json(conn, StatusOK, json_str, jsonlen);
@@ -481,9 +454,9 @@ void list_files(PulsarCtx* ctx) {
 
     PulsarConn* conn = ctx->conn;
 
-    StrSlice page_str      = query_get(conn, "page");
+    StrSlice page_str = query_get(conn, "page");
     StrSlice page_size_str = query_get(conn, "limit");
-    StrSlice name          = query_get(conn, "name");
+    StrSlice name = query_get(conn, "name");
 
     int page = 1, page_size = 10;
     if (page_str.data) ss_to_int(page_str, &page);
@@ -497,8 +470,8 @@ void list_files(PulsarCtx* ctx) {
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
     size_t key_len;
     if (!ss_is_empty(name)) {
-        key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d:n%.*s", page,
-                                   page_size, (int)name.len, name.data);
+        key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d:n%.*s", page, page_size, (int)name.len,
+                                   name.data);
     } else {
         key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d", page, page_size);
     }
@@ -509,7 +482,7 @@ void list_files(PulsarCtx* ctx) {
 
     /* Fetch the total row count for pagination metadata. */
     static const char* count_query = "SELECT COUNT(*) FROM files";
-    PGresult* count_res            = pgpool_query(db, count_query, 5000);
+    PGresult* count_res = pgpool_query(db, count_query, 5000);
     if (!count_res) {
         send_json_error(conn, pgpool_error_message(db));
         return;
@@ -519,14 +492,12 @@ void list_files(PulsarCtx* ctx) {
     int64_t total_count = 0;
     if (PQntuples(count_res) > 0) {
         const char* count_str = PQgetvalue(count_res, 0, 0);
-        if (count_str) {
-            total_count = strtoll(count_str, NULL, 10);
-        }
+        if (count_str) { total_count = strtoll(count_str, NULL, 10); }
     }
 
-    int offset        = (page - 1) * page_size;
+    int offset = (page - 1) * page_size;
     const char* query = NULL;
-    int param_count   = 0;
+    int param_count = 0;
     const char* params[3];
     char limit_str[32];
     char offset_str[32];
@@ -534,31 +505,26 @@ void list_files(PulsarCtx* ctx) {
     snprintf(offset_str, sizeof(offset_str), "%d", offset);
 
     /*
-     * When a name filter is present, promote the StrSlice to an owned cstr so
-     * it can be safely embedded in the ILIKE pattern.
-     */
+   * When a name filter is present, promote the StrSlice to an owned cstr so
+   * it can be safely embedded in the ILIKE pattern.
+   */
     char name_filter[128] = {0};
     if (!ss_is_empty(name)) {
         snprintf(name_filter, sizeof(name_filter), "%%%.*s%%", (int)name.len, name.data);
-        query =
-            "SELECT id, name, path, num_pages FROM files"
-            " WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3";
-        params[0]   = name_filter;
-        params[1]   = limit_str;
-        params[2]   = offset_str;
+        query = "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3";
+        params[0] = name_filter;
+        params[1] = limit_str;
+        params[2] = offset_str;
         param_count = 3;
     } else {
-        query     = "SELECT id, name, path, num_pages FROM files ORDER BY name LIMIT $1 OFFSET $2";
+        query = "SELECT id, name, path, num_pages FROM files ORDER BY name LIMIT $1 OFFSET $2";
         params[0] = limit_str;
         params[1] = offset_str;
         param_count = 2;
     }
 
     PGresult* res = pgpool_query_params(db, query, param_count, params, -1);
-    if (!res) {
-        send_json_error(conn, pgpool_error_message(db));
-        return;
-    }
+    HANDLE_QUERY_ERROR(res, conn);
     defer_pqclear(res);
 
     size_t jsonlen = 0;
@@ -567,7 +533,6 @@ void list_files(PulsarCtx* ctx) {
         send_json_error(conn, "Failed to serialize JSON response");
         return;
     }
-
     CACHE_SET_AND_SEND(g_res_cache, cache_key, key_len, conn, json_str, jsonlen, 0);
 }
 
@@ -583,7 +548,7 @@ void list_files(PulsarCtx* ctx) {
 void get_file_by_id(PulsarCtx* ctx) {
     ASSERT(g_res_cache);
 
-    PulsarConn* conn        = ctx->conn;
+    PulsarConn* conn = ctx->conn;
     const char* file_id_str = get_path_param(conn, "file_id");
 
     int64_t file_id = 0;
@@ -596,28 +561,21 @@ void get_file_by_id(PulsarCtx* ctx) {
     size_t key_len = (size_t)cache_make_key(cache_key, sizeof(cache_key), file_id, -1);
 
     CACHE_HIT_RETURN(g_res_cache, cache_key, key_len, conn);
+    ACQUIRE_DB(db);
 
     static const char* query = "SELECT name, path, num_pages FROM files WHERE id=$1 LIMIT 1";
-    const char* params[]     = {file_id_str};
+    const char* params[] = {file_id_str};
 
-    ACQUIRE_DB(db);
     PGresult* res = pgpool_query_params(db, query, 1, params, -1);
-    if (!res) {
-        send_json_error(conn, pgpool_error_message(db));
-        return;
-    }
+    HANDLE_QUERY_ERROR(res, conn);
     defer_pqclear(res);
 
-    if (PQntuples(res) == 0) {
-        conn_set_status(conn, StatusNotFound);
-        send_json_error(conn, "No book matches the requested ID");
-        return;
-    }
+    HANDLE_RECORD_NOT_FOUND(res, conn, "No book matches the requested ID");
 
-    const char* file_name     = PQgetvalue(res, 0, 0);
-    const char* file_path     = PQgetvalue(res, 0, 1);
+    const char* file_name = PQgetvalue(res, 0, 0);
+    const char* file_path = PQgetvalue(res, 0, 1);
     const char* num_pages_str = PQgetvalue(res, 0, 2);
-    int64_t num_pages         = strtoll(num_pages_str, NULL, 10);
+    int64_t num_pages = strtoll(num_pages_str, NULL, 10);
 
     size_t jsonlen = 0;
     char* json_str = json_create_file_response(file_id, file_name, file_path, num_pages, &jsonlen);

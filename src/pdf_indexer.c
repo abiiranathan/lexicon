@@ -43,12 +43,6 @@ typedef struct {
         if ((obj)) g_object_unref((obj)); \
     };
 
-/** Free a heap pointer safely on scope exit. */
-#define defer_free(ptr)         \
-    defer {                     \
-        if ((ptr)) free((ptr)); \
-    };
-
 /**
  * Extracts text from every page of @p doc and inserts it into the database.
  *
@@ -72,8 +66,7 @@ typedef struct {
  * @return true if every page was processed without error, false if at least
  *         one page could not be read or inserted.
  */
-static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char* name, int npages,
-                              pgconn_t* conn) {
+static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char* name, int npages, pgconn_t* conn) {
     bool all_ok = true;
     for (int page_num = 0; page_num < npages; page_num++) {
         PopplerPage* page = poppler_document_get_page(doc, page_num);
@@ -84,20 +77,18 @@ static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char*
         }
         defer_g_object_unref(page);
 
-        char* text = poppler_page_get_text(page);
+        DEFER_VAR char* text = poppler_page_get_text(page);
         defer_free(text);
 
         // Empty page — not an error, just nothing to index.
-        if (!text || text[0] == '\0') {
-            continue;
-        }
+        if (!text || text[0] == '\0') { continue; }
 
         size_t len = strlen(text);
 
         // Hard-truncate to stay within the tokenizer's input limit.
         if (len >= 2047) {
             text[2046] = '\0';
-            len        = 2046;
+            len = 2046;
         }
         pdf_text_clean(text, len, false);
 
@@ -116,15 +107,14 @@ static bool process_all_pages(PopplerDocument* doc, int64_t file_id, const char*
         // back to the savepoint clears that state while keeping the rest of
         // the transaction intact so we can continue processing remaining pages.
         if (!pgpool_execute(conn, "SAVEPOINT page_insert", 5000)) {
-            fprintf(stderr, ">>> Failed to set SAVEPOINT for page %d of %s: %s\n", page_num + 1,
-                    name, pgpool_error_message(conn));
+            fprintf(stderr, ">>> Failed to set SAVEPOINT for page %d of %s: %s\n", page_num + 1, name,
+                    pgpool_error_message(conn));
             all_ok = false;
             continue;
         }
 
         if (!pgpool_execute_params(conn, page_insert_query, 3, values, 5000)) {
-            fprintf(stderr, ">>> Failed to insert page %d of %s: %s\n", page_num + 1, name,
-                    pgpool_error_message(conn));
+            fprintf(stderr, ">>> Failed to insert page %d of %s: %s\n", page_num + 1, name, pgpool_error_message(conn));
 
             // Clear the aborted-transaction state before the next iteration.
             pgpool_execute(conn, "ROLLBACK TO SAVEPOINT page_insert", 5000);
@@ -175,7 +165,7 @@ static void process_pdf_task(void* arg) {
         g_free(uri);
     };
 
-    GError* error        = NULL;
+    GError* error = NULL;
     PopplerDocument* doc = poppler_document_new_from_file(uri, NULL, &error);
     defer_g_object_unref(doc);
 
@@ -190,8 +180,8 @@ static void process_pdf_task(void* arg) {
     // being picked up by a worker thread.
     int actual_pages = poppler_document_get_n_pages(doc);
     if (actual_pages != params->npages) {
-        fprintf(stderr, ">>> Page count mismatch for %s: expected %d, got %d\n", params->name,
-                params->npages, actual_pages);
+        fprintf(stderr, ">>> Page count mismatch for %s: expected %d, got %d\n", params->name, params->npages,
+                actual_pages);
         atomic_store(params->success, false);
         return;
     }
@@ -205,8 +195,7 @@ static void process_pdf_task(void* arg) {
     defer_release(pool, conn);
 
     if (!pgpool_begin(conn, 1000)) {
-        fprintf(stderr, ">>> Failed to BEGIN transaction for %s: %s\n", params->name,
-                pgpool_error_message(conn));
+        fprintf(stderr, ">>> Failed to BEGIN transaction for %s: %s\n", params->name, pgpool_error_message(conn));
         atomic_store(params->success, false);
         return;
     }
@@ -221,10 +210,9 @@ static void process_pdf_task(void* arg) {
     snprintf(num_pages_str, sizeof(num_pages_str), "%d", params->npages);
 
     const char* file_values[] = {params->name, params->path, num_pages_str};
-    PGresult* res             = pgpool_query_params(conn, file_insert_query, 3, file_values, -1);
+    PGresult* res = pgpool_query_params(conn, file_insert_query, 3, file_values, -1);
     if (!res) {
-        fprintf(stderr, ">>> Failed to insert file record for %s: %s\n", params->path,
-                pgpool_error_message(conn));
+        fprintf(stderr, ">>> Failed to insert file record for %s: %s\n", params->path, pgpool_error_message(conn));
         pgpool_rollback(conn, 2000);
         atomic_store(params->success, false);
         return;
@@ -259,8 +247,8 @@ static void process_pdf_task(void* arg) {
 
     if (pages_ok) {
         if (!pgpool_commit(conn, 1000)) {
-            fprintf(stderr, ">>> Failed to COMMIT transaction for %s: %s — rolling back\n",
-                    params->name, pgpool_error_message(conn));
+            fprintf(stderr, ">>> Failed to COMMIT transaction for %s: %s — rolling back\n", params->name,
+                    pgpool_error_message(conn));
             pgpool_rollback(conn, 1000);
             atomic_store(params->success, false);
         }
@@ -303,35 +291,27 @@ typedef struct {
  * @return DirContinue normally; DirSkip to skip a directory subtree; DirStop
  *         to abort the entire walk on an unrecoverable error.
  */
-static WalkDirOption walk_dir_callback(const FileAttributes* attr, const char* path,
-                                       const char* name, void* userdata) {
+static WalkDirOption walk_dir_callback(const FileAttributes* attr, const char* path, const char* name, void* userdata) {
     (void)attr;
 
     // Skip well-known build / VCS / tool directories to avoid wasted work.
     // NULL-terminated so new entries can be appended without changing the loop.
     static const char* skip_dirs[] = {
-        "node_modules", ".git",   ".svn",     ".hg",    "__pycache__", ".pytest_cache",
-        ".mypy_cache",  ".tox",   "venv",     ".venv",  "env",         ".env",
-        "vendor",       "build",  "dist",     "target", ".gradle",     ".idea",
-        ".vscode",      ".cache", "coverage", ".next",  ".nuxt",       ".turbo",
-        ".DS_Store",    NULL,
+        "node_modules", ".git",   ".svn",    ".hg",       "__pycache__", ".pytest_cache", ".mypy_cache",
+        ".tox",         "venv",   ".venv",   "env",       ".env",        "vendor",        "build",
+        "dist",         "target", ".gradle", ".idea",     ".vscode",     ".cache",        "coverage",
+        ".next",        ".nuxt",  ".turbo",  ".DS_Store", NULL,
     };
 
     for (size_t i = 0; skip_dirs[i] != NULL; i++) {
-        if (strcmp(name, skip_dirs[i]) == 0) {
-            return DirSkip;
-        }
+        if (strcmp(name, skip_dirs[i]) == 0) { return DirSkip; }
     }
 
     // Only process files whose extension is ".pdf" (case-insensitive).
     const char* ext = strrchr(name, '.');
-    if (!ext || ext == name) {
-        return DirContinue;
-    }
+    if (!ext || ext == name) { return DirContinue; }
     ext++;  // Advance past the dot.
-    if (strcasecmp(ext, "pdf") != 0) {
-        return DirContinue;
-    }
+    if (strcasecmp(ext, "pdf") != 0) { return DirContinue; }
 
     WalkDirUserData* data = userdata;
 
@@ -343,7 +323,7 @@ static WalkDirOption walk_dir_callback(const FileAttributes* attr, const char* p
         g_free(uri);
     };
 
-    GError* error        = NULL;
+    GError* error = NULL;
     PopplerDocument* doc = poppler_document_new_from_file(uri, NULL, &error);
     defer_g_object_unref(doc);
 
@@ -354,9 +334,7 @@ static WalkDirOption walk_dir_callback(const FileAttributes* attr, const char* p
     }
 
     int npages = poppler_document_get_n_pages(doc);
-    if (npages == 0 || npages < data->min_pages) {
-        return DirContinue;
-    }
+    if (npages == 0 || npages < data->min_pages) { return DirContinue; }
 
     if (data->dryrun) {
         printf(">>> Found %s (%d pages)\n", path, npages);
@@ -371,9 +349,9 @@ static WalkDirOption walk_dir_callback(const FileAttributes* attr, const char* p
         return DirStop;
     }
 
-    params->path    = strdup(path);
-    params->name    = strdup(name);
-    params->npages  = npages;
+    params->path = strdup(path);
+    params->name = strdup(name);
+    params->npages = npages;
     params->success = data->success;
 
     if (!params->path || !params->name) {
@@ -434,15 +412,13 @@ bool process_pdfs(const char* root_dir, int min_pages, bool dryrun) {
         threadpool_destroy(threadpool, -1);
     };
 
-    if (dryrun) {
-        printf("Performing index dry run on %s\n", root_dir);
-    }
+    if (dryrun) { printf("Performing index dry run on %s\n", root_dir); }
 
     WalkDirUserData data = {
-        .thpool    = threadpool,
+        .thpool = threadpool,
         .min_pages = min_pages,
-        .success   = &success,
-        .dryrun    = dryrun,
+        .success = &success,
+        .dryrun = dryrun,
     };
 
     int walk_result = dir_walk(root_dir, walk_dir_callback, &data);
