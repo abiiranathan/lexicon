@@ -59,16 +59,18 @@
  * @param key_     NUL-terminated cache key.
  * @param key_len_ Length of the key in bytes.
  * @param conn_    PulsarConn* to write the response to.
- * @param json_str_ Heap-allocated JSON string (caller-owned; freed by this
- * macro).
+ * @param json_str_ Arena-backed JSON string.
  * @param json_len_ Length of the JSON payload in bytes.
  * @param ttl_     TTL in seconds (0 = use cache default).
  */
-#define CACHE_SET_AND_SEND(cache_, key_, key_len_, conn_, json_str_, json_len_, ttl_)        \
-    do {                                                                                     \
-        cache_set((cache_), (key_), (key_len_), (uint8_t*)(json_str_), (json_len_), (ttl_)); \
-        conn_send_json((conn_), StatusOK, (json_str_), (json_len_));                         \
-        free((char*)(json_str_));                                                            \
+#define CACHE_SET_AND_SEND(cache_, key_, key_len_, conn_, json_str_, json_len_, ttl_)  \
+    do {                                                                               \
+        uint8_t* _cache_copy = (uint8_t*)malloc(json_len_);                            \
+        if (_cache_copy) {                                                             \
+            memcpy(_cache_copy, (json_str_), (json_len_));                             \
+            cache_set((cache_), (key_), (key_len_), _cache_copy, (json_len_), (ttl_)); \
+        }                                                                              \
+        conn_send_json((conn_), StatusOK, (json_str_), (json_len_));                   \
     } while (0)
 
 #define HANDLE_RECORD_NOT_FOUND(res, conn, errmsg) \
@@ -130,11 +132,13 @@ void destroy_response_cache(void) {
  * @param msg  Human-readable error message; must be NUL-terminated.
  */
 static inline void send_json_error(PulsarConn* conn, const char* msg) {
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
+
     size_t outlen;
-    char* err_str = json_create_error(msg, &outlen);
+    char* err_str = json_create_error(&alc, msg, &outlen);
     if (err_str) {
         conn_send_json(conn, StatusBadRequest, err_str, outlen);
-        free(err_str);
     } else {
         conn_send_json(conn, StatusInternalServerError, "{\"error\":\"Internal error\"}", 26);
     }
@@ -190,6 +194,8 @@ static inline int cache_make_key(char* buffer, size_t buffer_size, int64_t file_
  */
 void get_page_by_file_and_page(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
 
     const char* file_id_str = get_path_param(conn, "file_id");
     const char* page_num_str = get_path_param(conn, "page_num");
@@ -213,15 +219,18 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
     HANDLE_RECORD_NOT_FOUND(res, conn, "No page found for the requested file and page number");
 
     const char* text = PQgetvalue(res, 0, 0);
-    StrSlice response = json_create_page_response(file_id, (int)page_num, text);
+    StrSlice response = json_create_page_response(&alc, file_id, (int)page_num, text);
     if (!ss_is_valid(response)) {
         send_json_error(conn, "Failed to serialize JSON");
         return;
     }
 
-    cache_set(g_res_cache, cache_key, (size_t)key_len, (uint8_t*)response.data, response.len, 0);
+    uint8_t* cache_copy = malloc(response.len);
+    if (cache_copy) {
+        memcpy(cache_copy, response.data, response.len);
+        cache_set(g_res_cache, cache_key, (size_t)key_len, cache_copy, response.len, 60 * 60);
+    }
     conn_send_json(conn, StatusOK, response.data, response.len);
-    free((char*)response.data);
 }
 
 /** Function pointer type for a PDF page rendering backend. */
@@ -358,10 +367,10 @@ void pdf_search(PulsarCtx* ctx) {
 
     /* Build the cache key from the NUL-terminated copies. */
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
-    size_t key_len = (size_t)snprintf(cache_key, sizeof(cache_key) - 1, "search:%s:%s", query_cstr,
-                                      fileid_cstr ? fileid_cstr : "all");
+    int key_len = snprintf(cache_key, sizeof(cache_key), "search:%s:%s", query_cstr, fileid_cstr ? fileid_cstr : "all");
+    if (key_len < 0 || key_len >= (int)sizeof(cache_key)) { abort_400(conn, "query too long"); }
 
-    CACHE_HIT_RETURN(g_res_cache, cache_key, key_len, conn);
+    CACHE_HIT_RETURN(g_res_cache, cache_key, (size_t)key_len, conn);
 
     /* Build the parameterised SQL query. */
     const char* params[2];
@@ -430,10 +439,10 @@ void pdf_search(PulsarCtx* ctx) {
 
     HANDLE_QUERY_ERROR(res, conn);
 
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
     size_t jsonlen = 0;
-    DEFER_VAR char* json_str = json_create_search_results(res, query_cstr, &jsonlen);
-    defer_free(json_str);
-
+    char* json_str = json_create_search_results(&alc, res, query_cstr, &jsonlen);
     conn_send_json(conn, StatusOK, json_str, jsonlen);
 }
 
@@ -528,7 +537,9 @@ void list_files(PulsarCtx* ctx) {
     defer_pqclear(res);
 
     size_t jsonlen = 0;
-    char* json_str = json_create_file_list(res, page, page_size, total_count, &jsonlen);
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
+    char* json_str = json_create_file_list(&alc, res, page, page_size, total_count, &jsonlen);
     if (!json_str) {
         send_json_error(conn, "Failed to serialize JSON response");
         return;
@@ -546,16 +557,9 @@ void list_files(PulsarCtx* ctx) {
  *   file_id - Integer database identifier of the file.
  */
 void get_file_by_id(PulsarCtx* ctx) {
-    ASSERT(g_res_cache);
-
     PulsarConn* conn = ctx->conn;
     const char* file_id_str = get_path_param(conn, "file_id");
-
-    int64_t file_id = 0;
-    if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
-        send_json_error(conn, "Invalid file ID: must be a valid integer");
-        return;
-    }
+    int64_t file_id = strtoll(file_id_str, NULL, 10);
 
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
     size_t key_len = (size_t)cache_make_key(cache_key, sizeof(cache_key), file_id, -1);
@@ -577,12 +581,12 @@ void get_file_by_id(PulsarCtx* ctx) {
     const char* num_pages_str = PQgetvalue(res, 0, 2);
     int64_t num_pages = strtoll(num_pages_str, NULL, 10);
 
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
+
     size_t jsonlen = 0;
-    char* json_str = json_create_file_response(file_id, file_name, file_path, num_pages, &jsonlen);
-    if (!json_str) {
-        send_json_error(conn, "Failed to serialize JSON");
-        return;
-    }
+    char* json_str = json_create_file_response(&alc, file_id, file_name, file_path, num_pages, &jsonlen);
+    abort_if_nullptr(json_str, conn, "Failed to serialize JSON");
 
     CACHE_SET_AND_SEND(g_res_cache, cache_key, key_len, conn, json_str, jsonlen, 0);
 }

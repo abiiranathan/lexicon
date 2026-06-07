@@ -4,6 +4,7 @@
 #include <pulsar/pulsar.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "json_allocator.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -18,9 +18,6 @@
   let currentTab = useLocalStorage("currentTab", "search");
   let searchQuery = useLocalStorage("search-query", "");
   let fileNameFilter = useLocalStorage("file-name-filter", "");
-  let aiEnabled = useLocalStorage("ai-enabled", true);
-
-  let useAI = $state(aiEnabled.value);
 
   let searchResults = $state<{ results: SearchResult[] }>({
     results: [],
@@ -98,7 +95,7 @@
 
     const start = performance.now();
     try {
-      const data = await searchAPI(query, { aiEnabled: useAI });
+      const data = await searchAPI(query);
 
       // Bounded cache avoid excessive memory consumption.
       if (searchCache.size < maxCacheSize) {
@@ -218,14 +215,6 @@
       clearTimeout(fileFilterTimeout);
     };
   });
-
-  $effect(() => {
-    if (useAI) {
-      aiEnabled.set(true);
-    } else {
-      aiEnabled.set(false);
-    }
-  });
 </script>
 
 <div class="container">
@@ -339,216 +328,3 @@
   {modalContent}
   {viewPage}
 />
-
-<style>
-  .header {
-    margin-bottom: 2.5rem;
-  }
-
-  .logo-section {
-    display: flex;
-    align-items: center;
-    gap: 1.25rem;
-  }
-
-  .logo-text {
-    flex: 1;
-  }
-
-  .logo-text h1 {
-    margin: 0;
-    font-size: 2.25rem;
-    font-weight: 700;
-    background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    letter-spacing: -0.02em;
-    line-height: 1.2;
-  }
-
-  .tagline {
-    margin: 0.375rem 0 0 0;
-    font-size: 0.9375rem;
-    color: var(--text-secondary, #94a3b8);
-    font-weight: 500;
-    letter-spacing: 0.01em;
-  }
-
-  .content-section {
-    margin-top: 2rem;
-  }
-
-  .files-controls {
-    display: flex;
-    gap: 1rem;
-    align-items: center;
-    margin-bottom: 1.5rem;
-    flex-wrap: wrap;
-  }
-
-  .file-name-filter {
-    flex: 1;
-    min-width: 200px;
-    padding: 0.625rem 1rem;
-    background: var(--surface, #1e293b);
-    border: 1px solid var(--border, #334155);
-    border-radius: 0.5rem;
-    color: var(--text-primary, #f1f5f9);
-    font-size: 0.9375rem;
-    transition: all 0.2s ease;
-  }
-
-  .file-name-filter:focus {
-    outline: none;
-    border-color: var(--primary, #60a5fa);
-    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.1);
-  }
-
-  .file-name-filter::placeholder {
-    color: var(--text-tertiary, #64748b);
-  }
-
-  .limit-selector {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .limit-selector label {
-    font-size: 0.875rem;
-    color: var(--text-secondary, #94a3b8);
-    white-space: nowrap;
-  }
-
-  .limit-selector select {
-    padding: 0.5rem 0.75rem;
-    background: var(--surface, #1e293b);
-    border: 1px solid var(--border, #334155);
-    border-radius: 0.375rem;
-    color: var(--text-primary, #f1f5f9);
-    font-size: 0.875rem;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-
-  .limit-selector select:focus {
-    outline: none;
-    border-color: var(--primary, #60a5fa);
-  }
-
-  .pagination {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-top: 2rem;
-    padding: 1.25rem;
-    background: var(--surface, #1e293b);
-    border: 1px solid var(--border, #334155);
-    border-radius: 0.75rem;
-  }
-
-  .pagination-btn {
-    padding: 0.625rem 1.25rem;
-    background: var(--primary, #60a5fa);
-    color: white;
-    border: none;
-    border-radius: 0.5rem;
-    font-size: 0.9375rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    min-width: 100px;
-  }
-
-  .pagination-btn:hover:not(:disabled) {
-    background: var(--primary-hover, #3b82f6);
-    transform: translateY(-1px);
-  }
-
-  .pagination-btn:disabled {
-    background: var(--surface-elevated, #334155);
-    color: var(--text-tertiary, #64748b);
-    cursor: not-allowed;
-    opacity: 0.5;
-  }
-
-  .pagination-info {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.25rem;
-  }
-
-  .page-numbers {
-    font-size: 0.9375rem;
-    font-weight: 600;
-    color: var(--text-primary, #f1f5f9);
-  }
-
-  .total-count {
-    font-size: 0.8125rem;
-    color: var(--text-secondary, #94a3b8);
-  }
-
-  @media (max-width: 640px) {
-    .container {
-      padding: 1rem;
-    }
-
-    .logo-section {
-      gap: 1rem;
-    }
-
-    .logo-text h1 {
-      font-size: 1.75rem;
-    }
-
-    .tagline {
-      font-size: 0.875rem;
-    }
-
-    .header {
-      margin-bottom: 2rem;
-    }
-
-    .files-controls {
-      flex-direction: column;
-      align-items: stretch;
-    }
-
-    .file-name-filter {
-      width: 100%;
-      min-width: unset;
-    }
-
-    .limit-selector {
-      justify-content: space-between;
-    }
-
-    .pagination {
-      flex-direction: column;
-      gap: 1rem;
-    }
-
-    .pagination-btn {
-      width: 100%;
-    }
-  }
-
-  @media (max-width: 480px) {
-    .logo-section {
-      flex-direction: column;
-      align-items: center;
-    }
-
-    .logo-text h1 {
-      font-size: 1.5rem;
-    }
-
-    .tagline {
-      font-size: 0.8125rem;
-    }
-  }
-</style>

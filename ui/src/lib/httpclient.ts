@@ -25,10 +25,9 @@ export async function getFileByID(fileId: number): Promise<FileType> {
     return data
 }
 
-export async function searchAPI(query: string, args?: { fileId?: number, aiEnabled: boolean }): Promise<{ results: SearchResult[] }> {
+export async function searchAPI(query: string, args?: { fileId?: number }): Promise<{ results: SearchResult[] }> {
     const params = new URLSearchParams()
     params.set("q", query)
-    params.set("ai_enabled", args?.aiEnabled ? "true" : "false")
 
     if (args && args.fileId) {
         params.set("file_id", args.fileId.toString());

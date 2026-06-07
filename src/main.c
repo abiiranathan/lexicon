@@ -105,13 +105,13 @@ int main(int argc, char* argv[]) {
     }
 
     // Register all routes
-    route_register("/api/search", HTTP_GET, pdf_search);
-    route_register("/api/list-files", HTTP_GET, list_files);
-    route_register("/api/list-files/{file_id}", HTTP_GET, get_file_by_id);
+    route_get("/api/search", pdf_search);
+    route_get("/api/list-files", list_files);
+    route_get("/api/list-files/{file_id}", get_file_by_id);
 
     /* Page detail endpoint */
-    route_register("/api/file/{file_id}/page/{page_num}", HTTP_GET, get_page_by_file_and_page);
-    route_register("/api/file/{file_id}/render-page/{page_num}", HTTP_GET, render_pdf_page_as_png);
+    route_get("/api/file/{file_id}/page/{page_num}", get_page_by_file_and_page);
+    route_get("/api/file/{file_id}/render-page/{page_num}", render_pdf_page_as_png);
 
     // Since we are using / for static assets, put at the end to avoid collisions
     route_static("/", "./ui/dist");

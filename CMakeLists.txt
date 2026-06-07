@@ -22,6 +22,7 @@ add_executable(${PROJECT_NAME}
     src/pdf_preprocess.c
     src/database.c
     src/json_response.c
+    src/json_allocator.c
 )
 
 # All dependencies from abiiranathan can be built from source with cmake
