@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpoppler-glib-dev \
     libglib2.0-dev \
     libcairo2-dev \
+    libpcre2-dev \
     zlib1g-dev \
     ca-certificates \
     wget \
@@ -93,6 +94,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpoppler-glib8 \
     libglib2.0-0 \
     libcairo2 \
+    libpcre2-8-0 \
     zlib1g \
     ca-certificates \
     wget \

@@ -254,10 +254,6 @@ npm run build  # Outputs to ./dist
 - Check PostgreSQL version supports `tsvector` (9.6+)
 - Verify database exists: `psql -l | grep pdfsearch`
 
-### Search returns no results
-- Verify indexing completed: `SELECT COUNT(*) FROM pages;`
-- Check search query format (uses `websearch_to_tsquery`)
-- Minimum rank threshold is 0.005 (adjust in `pdf_search` function)
 
 ### High memory usage
 - Reduce cache capacity: `init_response_cache(512, 300);`
