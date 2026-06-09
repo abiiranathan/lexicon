@@ -250,25 +250,25 @@ typedef bool (*PageRenderFunc)(const char* pdf_path, int page_num, pdf_buffer_t*
  *   type - "png" (default) or "pdf".
  */
 void render_pdf_page_as_png(PulsarCtx* ctx) {
+    static const char* type_png = "png";
+    static const char* type_pdf = "pdf";
+    bool is_png = true, is_pdf = false;
     PulsarConn* conn = ctx->conn;
-
     require_path_param(file_id_str, conn, "file_id");
     require_path_param(page_num_str, conn, "page_num");
 
-    StrSlice type = query_get(conn, "type");
-    if (ss_is_empty(type)) type = SS_LIT("png");
+    const char* type = query_get(conn, "type");
+    if (!type) type = type_png;
+    is_png = strcmp(type, type_png) == 0;
+    is_pdf = strcmp(type, type_pdf) == 0;
 
-    const StrSlice type_png = SS_LIT("png");
-    const StrSlice type_pdf = SS_LIT("pdf");
-
-    if (!(ss_equal(type, type_png) || ss_equal(type, type_pdf))) {
+    if (!(is_png || is_pdf)) {
         send_json_error(conn, "type query parameter must be either 'png' or 'pdf'");
         return;
     }
 
     int64_t file_id = 0;
     int page_num = 0;
-
     if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
         send_json_error(conn, "Invalid file ID: must be a valid integer");
         return;
@@ -279,13 +279,9 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
         return;
     }
 
-    /* NUL-terminate the type slice before embedding it in the cache key. */
-    autofree char* type_cstr = ss_to_owned_cstr(type);
-    abort_if_nullptr(type_cstr, conn, "malloc failed for type query");
-
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
     size_t key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d:type:%s",
-                                      (long long)file_id, page_num, type_cstr);
+                                      (long long)file_id, page_num, type);
 
     static const char png_headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
     static const char pdf_headers
@@ -296,8 +292,9 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     size_t cached_len = 0;
     const char* cached_data = cache_get(g_res_cache, cache_key, key_len, &cached_len);
     if (cached_data) {
-        const char* hdrs = ss_equal(type, type_png) ? png_headers : pdf_headers;
-        conn_writeheader_raw(conn, hdrs, strlen(hdrs));
+        const char* hdrs = is_png ? png_headers : pdf_headers;
+        size_t length = is_png ? sizeof(png_headers) - 1 : sizeof(pdf_headers) - 1;
+        conn_writeheader_raw(conn, hdrs, length);
         conn_write(conn, cached_data, cached_len);
         cache_release(cached_data);
         return;
@@ -322,7 +319,7 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     PageRenderFunc renderer = NULL;
     const char* hdrs = NULL;
 
-    if (ss_equal(type, type_png)) {
+    if (is_png) {
         renderer = render_page_from_document_to_buffer;
         hdrs = png_headers;
     } else {
@@ -356,18 +353,12 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
  */
 void pdf_search(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    StrSlice slice_fileid = query_get(conn, "file_id");
-    require_query_alloc(query_cstr, conn, "q");
-
-    autofree char* fileid_cstr = NULL;
-    if (!ss_is_empty(slice_fileid)) {
-        fileid_cstr = ss_to_owned_cstr(slice_fileid);
-        abort_if_nullptr(fileid_cstr, conn, "memory alloc failed");
-    };
+    const char* file_id = query_get(conn, "file_id");
+    const char* query_str = query_get(conn, "q");
 
     /* Build the cache key from the NUL-terminated copies. */
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
-    int key_len = snprintf(cache_key, sizeof(cache_key), "search:%s:%s", query_cstr, fileid_cstr ? fileid_cstr : "all");
+    int key_len = snprintf(cache_key, sizeof(cache_key), "search:%s:%s", query_str, file_id ? file_id : "all");
     if (key_len < 0 || key_len >= (int)sizeof(cache_key)) { abort_400(conn, "query too long"); }
 
     CACHE_HIT_RETURN(g_res_cache, cache_key, (size_t)key_len, conn);
@@ -375,10 +366,10 @@ void pdf_search(PulsarCtx* ctx) {
     /* Build the parameterised SQL query. */
     const char* params[2];
     int param_count = 1;
-    params[0] = query_cstr;
+    params[0] = query_str;
 
-    if (fileid_cstr) {
-        params[1] = fileid_cstr;
+    if (file_id) {
+        params[1] = file_id;
         param_count = 2;
     }
 
@@ -425,7 +416,7 @@ void pdf_search(PulsarCtx* ctx) {
              " ORDER BY u.rank DESC, f.name, u.page_num LIMIT 100";
 
     char full_query[4096];
-    if (fileid_cstr) {
+    if (file_id) {
         snprintf(full_query, sizeof(full_query), "%s AND p.file_id = $2 %s", common_cte, query_suffix);
     } else {
         snprintf(full_query, sizeof(full_query), "%s %s", common_cte, query_suffix);
@@ -442,7 +433,7 @@ void pdf_search(PulsarCtx* ctx) {
     yyjson_alc alc;
     yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
     size_t jsonlen = 0;
-    char* json_str = json_create_search_results(&alc, res, query_cstr, &jsonlen);
+    char* json_str = json_create_search_results(&alc, res, query_str, &jsonlen);
     conn_send_json(conn, StatusOK, json_str, jsonlen);
 }
 
@@ -463,13 +454,13 @@ void list_files(PulsarCtx* ctx) {
 
     PulsarConn* conn = ctx->conn;
 
-    StrSlice page_str = query_get(conn, "page");
-    StrSlice page_size_str = query_get(conn, "limit");
-    StrSlice name = query_get(conn, "name");
+    const char* page_str = query_get(conn, "page");
+    const char* page_size_str = query_get(conn, "limit");
+    const char* name = query_get(conn, "name");
 
     int page = 1, page_size = 10;
-    if (page_str.data) ss_to_int(page_str, &page);
-    if (page_size_str.data) ss_to_int(page_size_str, &page_size);
+    if (page_str) str_to_int(page_str, &page);
+    if (page_size_str) str_to_int(page_size_str, &page_size);
 
     if (page < 1) page = 1;
     if (page_size < 1) page_size = 25;
@@ -478,9 +469,8 @@ void list_files(PulsarCtx* ctx) {
     /* Build cache key from pagination params and optional name filter. */
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
     size_t key_len;
-    if (!ss_is_empty(name)) {
-        key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d:n%.*s", page, page_size, (int)name.len,
-                                   name.data);
+    if (!name) {
+        key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d:n%s", page, page_size, name);
     } else {
         key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d", page, page_size);
     }
@@ -513,13 +503,9 @@ void list_files(PulsarCtx* ctx) {
     snprintf(limit_str, sizeof(limit_str), "%d", page_size);
     snprintf(offset_str, sizeof(offset_str), "%d", offset);
 
-    /*
-   * When a name filter is present, promote the StrSlice to an owned cstr so
-   * it can be safely embedded in the ILIKE pattern.
-   */
     char name_filter[128] = {0};
-    if (!ss_is_empty(name)) {
-        snprintf(name_filter, sizeof(name_filter), "%%%.*s%%", (int)name.len, name.data);
+    if (name) {
+        snprintf(name_filter, sizeof(name_filter), "%%%s%%", name);
         query = "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3";
         params[0] = name_filter;
         params[1] = limit_str;
