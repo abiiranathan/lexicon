@@ -4,11 +4,15 @@
 #include <solidc/defer.h>
 #include <solidc/macros.h>
 #include <solidc/str_to_num.h>
+#include <vfs.h>
 
 #include "../include/database.h"
 #include "../include/json_response.h"
 #include "../include/pdf.h"
 #include "../include/routes.h"
+
+// Instance of VFS from main. (must not be NULL)
+extern vfs_t* vfs;
 
 /** Maximum length for any cache key string, including the NUL terminator. */
 #define CACHE_KEY_MAX_LEN 128
@@ -125,6 +129,12 @@ void destroy_response_cache(void) {
  * ---------------------------------------------------------------------------
  */
 
+// Opens a document from the VFS if one exists otherwise uses default filesystem.
+PopplerDocument* gen_open_document(const char* path, int* num_pages) {
+    if (vfs != NULL) { return open_vfs_document(vfs, path, num_pages); }
+    return open_document(path, num_pages);
+}
+
 /**
  * Sends a JSON-encoded error body with HTTP 400 Bad Request.
  *
@@ -234,7 +244,7 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
 }
 
 /** Function pointer type for a PDF page rendering backend. */
-typedef bool (*PageRenderFunc)(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer);
+typedef bool (*PageRenderFunc)(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
 
 /**
  * GET /files/:file_id/pages/:page_num/render?type=[png|pdf]
@@ -268,20 +278,20 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     }
 
     int64_t file_id = 0;
-    int page_num = 0;
+    int page = 0;
     if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
         send_json_error(conn, "Invalid file ID: must be a valid integer");
         return;
     }
 
-    if (str_to_int(page_num_str, &page_num) != STO_SUCCESS) {
+    if (str_to_int(page_num_str, &page) != STO_SUCCESS) {
         send_json_error(conn, "Invalid page number: must be a valid integer");
         return;
     }
 
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
     size_t key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d:type:%s",
-                                      (long long)file_id, page_num, type);
+                                      (long long)file_id, page, type);
 
     static const char png_headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
     static const char pdf_headers
@@ -310,11 +320,6 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     HANDLE_QUERY_ERROR(res, conn);
     HANDLE_RECORD_NOT_FOUND(res, conn, "No file found for the requested file");
 
-    if (page_num < 1) {
-        send_json_error(conn, "Page out of range");
-        return;
-    }
-
     const char* path = PQgetvalue(res, 0, 0);
     PageRenderFunc renderer = NULL;
     const char* hdrs = NULL;
@@ -330,7 +335,19 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     pdf_buffer_t byte_buf = {0};
     conn_writeheader_raw(conn, hdrs, strlen(hdrs));
 
-    if (renderer(path, page_num - 1, &byte_buf)) {
+    int num_pages;
+    PopplerDocument* doc = gen_open_document(path, &num_pages);
+    if (!doc) {
+        send_json_error(conn, "Failed to open document");
+        return;
+    }
+
+    if (page < 1 || page > num_pages) {
+        send_json_error(conn, "Page out of range");
+        return;
+    }
+
+    if (renderer(doc, page - 1, &byte_buf)) {
         conn_write(conn, byte_buf.data, byte_buf.size);
         /* TTL of 60 s for rendered page images. */
         cache_set(g_res_cache, cache_key, key_len, byte_buf.data, byte_buf.size, 60);

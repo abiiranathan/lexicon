@@ -29,6 +29,7 @@ add_executable(${PROJECT_NAME}
 target_link_libraries(${PROJECT_NAME} PRIVATE 
     pgpool # github.com/abiiranathan/pgpool     (libpq connection pool library)
     solidc # github.com/abiiranathan/solidc     (Cross-platform C utilities and DS)
+    vfs # github.com/abiiranathan/vfs          (Virtual File System)
     pulsar # github.com/abiiranathan/pulsar     (Robust epoll-based web server)
     yyjson # https://github.com/ibireme/yyjson  (Json serializer and parser)
     m      # math library

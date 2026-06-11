@@ -1,5 +1,6 @@
 #include "../include/pdf.h"
-#include <string.h>  // for memcpy
+#include <solidc/defer.h>
+#include <string.h>
 
 /** Global mutex to serialize Cairo operations (Cairo is not fully thread-safe). */
 static pthread_mutex_t cairo_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -13,7 +14,7 @@ __attribute__((destructor)) void destroy_cairo_mutex(void) {
 #define UNLOCK_CAIRO_MUTEX() pthread_mutex_unlock(&cairo_mutex)
 
 /** Default rendering resolution in DPI. */
-static const double DEFAULT_RESOLUTION = 150.0;
+static const double DEFAULT_RESOLUTION = 300.0;
 
 PopplerDocument* open_document(const char* filename, int* num_pages) {
     if (filename == NULL || num_pages == NULL) {
@@ -50,17 +51,74 @@ PopplerDocument* open_document(const char* filename, int* num_pages) {
     return doc;
 }
 
+PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pages) {
+    /* Open target path inside VFS */
+    vfs_fd_t fd = vfs_fopen(vfs, vfs_path, VFS_O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "Error opening VFS path %s: %s\n", vfs_path, vfs_strerror((vfs_status_t)fd));
+        return NULL;
+    }
+    defer {
+        vfs_fclose(vfs, fd);
+    };
+
+    /* Retrieve file statistics to get size */
+    vfs_stat_t st;
+    vfs_status_t status = vfs_stat(vfs, vfs_path, &st);
+    if (status != VFS_OK) {
+        fprintf(stderr, "Error getting stats for VFS path %s: %s\n", vfs_path, vfs_strerror(status));
+        return NULL;
+    }
+
+    /* Use GLib's g_try_malloc to safely allocate memory for ownership transfer */
+    char* buffer = g_try_malloc(st.size);
+    if (!buffer) {
+        fprintf(stderr, "Error: Failed to allocate memory of size %lu\n", (unsigned long)st.size);
+        return NULL;
+    }
+
+    /* Safety fallback: if we return before transferring ownership to GBytes, free buffer */
+    bool ownership_transferred = false;
+    defer {
+        if (!ownership_transferred) { g_free(buffer); }
+    };
+
+    /* Read VFS data blocks into buffer */
+    size_t bytes_read = 0;
+    status = vfs_fread(vfs, fd, buffer, st.size, &bytes_read);
+    if (status != VFS_OK) {
+        fprintf(stderr, "vfs_fread failed for %s: %s\n", vfs_path, vfs_strerror(status));
+        return NULL;
+    }
+
+    /* Zero-copy allocation wrapper: GBytes assumes ownership of 'buffer' directly */
+    GBytes* bytes = g_bytes_new_take(buffer, st.size);
+    ownership_transferred = true;
+
+    /* Guarantee that GBytes is unreferenced on every subsequent exit path */
+    defer {
+        g_bytes_unref(bytes);
+    };
+
+    GError* error = NULL;
+    PopplerDocument* doc = poppler_document_new_from_bytes(bytes, NULL, &error);
+    if (!doc) {
+        if (error) {
+            fprintf(stderr, "Error opening doc from bytes: %s\n", error->message);
+            g_clear_error(&error);
+        } else {
+            fprintf(stderr, "Error opening doc from bytes (unknown error)\n");
+        }
+        return NULL;
+    }
+
+    /* Correctly populate output parameter */
+    *num_pages = poppler_document_get_n_pages(doc);
+
+    return doc;
+}
+
 void render_page_to_image(PopplerPage* page, int width, int height, const char* output_file) {
-    if (page == NULL || output_file == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to render_page_to_image\n");
-        return;
-    }
-
-    if (width <= 0 || height <= 0) {
-        fprintf(stderr, "Error: Invalid dimensions (%d x %d)\n", width, height);
-        return;
-    }
-
     // Calculate pixel dimensions at the target resolution
     int pixel_width = (int)(width * DEFAULT_RESOLUTION / 72.0);
     int pixel_height = (int)(height * DEFAULT_RESOLUTION / 72.0);
@@ -154,16 +212,6 @@ static cairo_status_t cairo_write_to_buffer(void* closure, const unsigned char* 
 }
 
 bool render_page_to_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
-    if (page == NULL || out_buffer == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to render_page_to_buffer\n");
-        return false;
-    }
-
-    if (width <= 0 || height <= 0) {
-        fprintf(stderr, "Error: Invalid dimensions (%d x %d)\n", width, height);
-        return false;
-    }
-
     // Calculate pixel dimensions at the target resolution
     int pixel_width = (int)(width * DEFAULT_RESOLUTION / 72.0);
     int pixel_height = (int)(height * DEFAULT_RESOLUTION / 72.0);
@@ -225,84 +273,28 @@ bool render_page_to_buffer(PopplerPage* page, int width, int height, pdf_buffer_
     return true;
 }
 
-bool render_page_from_document(const char* pdf_path, int page_num, const char* output_png) {
-    if (pdf_path == NULL || output_png == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to render_page_from_document\n");
-        return false;
-    }
-
-    int num_pages = 0;
-    PopplerDocument* doc = open_document(pdf_path, &num_pages);
-    if (doc == NULL) {
-        fprintf(stderr, "Error: Could not open document: %s\n", pdf_path);
-        return false;
-    }
-
-    if (page_num < 0 || page_num >= num_pages) {
-        fprintf(stderr, "Error: Page number %d is out of range (0-%d)\n", page_num, num_pages - 1);
-        g_object_unref(doc);
-        return false;
-    }
-
+bool render_page_from_document(PopplerDocument* doc, int page_num, const char* output_png) {
     PopplerPage* page = poppler_document_get_page(doc, page_num);
-    if (page == NULL) {
-        fprintf(stderr, "Error: Could not get page %d\n", page_num);
-        g_object_unref(doc);
-        return false;
-    }
-
+    if (!page) { return false; }
     double width, height;
     poppler_page_get_size(page, &width, &height);
-
     render_page_to_image(page, (int)width, (int)height, output_png);
-
     g_object_unref(page);
-    g_object_unref(doc);
-    return true;
+    return false;
 }
 
-bool render_page_from_document_to_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer) {
-    if (pdf_path == NULL || out_buffer == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to render_page_from_document_to_buffer\n");
-        return false;
-    }
-
-    int num_pages = 0;
-    PopplerDocument* doc = open_document(pdf_path, &num_pages);
-    if (doc == NULL) {
-        fprintf(stderr, "Error: Could not open document: %s\n", pdf_path);
-        return false;
-    }
-
-    if (page_num < 0 || page_num >= num_pages) {
-        fprintf(stderr, "Error: Page number %d is out of range (0-%d)\n", page_num, num_pages - 1);
-        g_object_unref(doc);
-        return false;
-    }
-
+bool render_page_from_document_to_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer) {
     PopplerPage* page = poppler_document_get_page(doc, page_num);
-    if (page == NULL) {
-        fprintf(stderr, "Error: Could not get page %d\n", page_num);
-        g_object_unref(doc);
-        return false;
-    }
+    if (!page) { return false; }
 
     double width, height;
     poppler_page_get_size(page, &width, &height);
-
     bool result = render_page_to_buffer(page, (int)width, (int)height, out_buffer);
-
     g_object_unref(page);
-    g_object_unref(doc);
     return result;
 }
 
 bool poppler_page_to_pdf(PopplerPage* page, const char* output_pdf) {
-    if (page == NULL || output_pdf == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to poppler_page_to_pdf\n");
-        return false;
-    }
-
     double width, height;
     poppler_page_get_size(page, &width, &height);
 
@@ -344,37 +336,14 @@ bool poppler_page_to_pdf(PopplerPage* page, const char* output_pdf) {
     return true;
 }
 
-bool render_page_to_pdf(const char* pdf_path, int page_num, const char* output_pdf) {
-    if (pdf_path == NULL || output_pdf == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to render_page_to_pdf\n");
-        return false;
-    }
-
-    int num_pages = 0;
-    PopplerDocument* doc = open_document(pdf_path, &num_pages);
-    if (doc == NULL) {
-        fprintf(stderr, "Error: Could not open document: %s\n", pdf_path);
-        return false;
-    }
-
-    if (page_num < 0 || page_num >= num_pages) {
-        fprintf(stderr, "Error: Page number %d is out of range (0-%d)\n", page_num, num_pages - 1);
-        g_object_unref(doc);
-        return false;
-    }
-
+bool render_page_to_pdf(PopplerDocument* doc, int page_num, const char* output_pdf) {
     PopplerPage* page = poppler_document_get_page(doc, page_num);
-    if (page == NULL) {
-        fprintf(stderr, "Error: Could not get page %d\n", page_num);
-        g_object_unref(doc);
-        return false;
+    if (page) {
+        bool status = poppler_page_to_pdf(page, output_pdf);
+        g_object_unref(page);
+        return status;
     }
-
-    bool status = poppler_page_to_pdf(page, output_pdf);
-
-    g_object_unref(page);
-    g_object_unref(doc);
-    return status;
+    return false;
 }
 
 // GZIP compression of DOCUMENT into PNG
@@ -501,16 +470,6 @@ static bool finalize_gzip_compression(cairo_gzip_write_context_t* ctx) {
 }
 
 bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
-    if (page == NULL || out_buffer == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to render_page_to_compressed_buffer\n");
-        return false;
-    }
-
-    if (width <= 0 || height <= 0) {
-        fprintf(stderr, "Error: Invalid dimensions (%d x %d)\n", width, height);
-        return false;
-    }
-
     // Calculate pixel dimensions at the target resolution
     int pixel_width = (int)(width * DEFAULT_RESOLUTION / 72.0);
     int pixel_height = (int)(height * DEFAULT_RESOLUTION / 72.0);
@@ -636,18 +595,9 @@ void free_pdf_metadata(pdf_metadata_t* meta) {
     memset(meta, 0, sizeof(pdf_metadata_t));
 }
 
-bool get_pdf_metadata(const char* filename, pdf_metadata_t* out_meta) {
-    if (filename == NULL || out_meta == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to get_pdf_metadata\n");
-        return false;
-    }
-
+void get_pdf_metadata(PopplerDocument* doc, int num_pages, pdf_metadata_t* out_meta) {
     // Initialize structure
     memset(out_meta, 0, sizeof(pdf_metadata_t));
-
-    int num_pages = 0;
-    PopplerDocument* doc = open_document(filename, &num_pages);
-    if (doc == NULL) { return false; }
 
     // Basic Integer/Boolean properties
     out_meta->page_count = num_pages;
@@ -671,16 +621,10 @@ bool get_pdf_metadata(const char* filename, pdf_metadata_t* out_meta) {
 
     out_meta->creation_date = format_time_property(create_time);
     out_meta->mod_date = format_time_property(mod_time);
-
-    g_object_unref(doc);
-    return true;
 }
 
 bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer) {
-    if (page == NULL || out_buffer == NULL) {
-        fprintf(stderr, "Error: Invalid parameters to render_page_to_pdf_buffer\n");
-        return false;
-    }
+    if (page == NULL || out_buffer == NULL) { return false; }
 
     double width, height;
     poppler_page_get_size(page, &width, &height);
@@ -741,35 +685,11 @@ bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer) {
     return true;
 }
 
-bool render_page_from_document_to_pdf_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer) {
-    if (pdf_path == NULL || out_buffer == NULL) {
-        fprintf(stderr, "Error: Invalid parameters\n");
-        return false;
-    }
-
-    int num_pages = 0;
-    PopplerDocument* doc = open_document(pdf_path, &num_pages);
-    if (doc == NULL) {
-        fprintf(stderr, "Error: Could not open document: %s\n", pdf_path);
-        return false;
-    }
-
-    if (page_num < 0 || page_num >= num_pages) {
-        fprintf(stderr, "Error: Page number %d is out of range (0-%d)\n", page_num, num_pages - 1);
-        g_object_unref(doc);
-        return false;
-    }
-
+bool render_page_from_document_to_pdf_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer) {
     PopplerPage* page = poppler_document_get_page(doc, page_num);
-    if (page == NULL) {
-        fprintf(stderr, "Error: Could not get page %d\n", page_num);
-        g_object_unref(doc);
-        return false;
-    }
+    if (!page) { return false; }
 
     bool result = render_page_to_pdf_buffer(page, out_buffer);
-
     g_object_unref(page);
-    g_object_unref(doc);
     return result;
 }

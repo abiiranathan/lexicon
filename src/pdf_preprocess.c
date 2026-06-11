@@ -280,7 +280,6 @@ char* pdf_text_clean(char* text, size_t len, bool remove_urls) {
 
     /* Discard reference / bibliography / index pages. */
     if (write > 100 && is_boilerplate_page(text, write)) {
-        printf("Skipping reference/index page\n");
         text[0] = '\0';
         return text;
     }

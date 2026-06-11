@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <vfs.h>
 #include <zlib.h>  // for gzip compression
 
 /**
@@ -21,6 +22,17 @@
  * @note Thread-safe.
  */
 PopplerDocument* open_document(const char* filename, int* num_pages);
+
+/**
+ * Opens a PDF document from a VFS and returns a PopplerDocument object.
+ *
+ * @param filename Path to the PDF file to open.
+ * @param num_pages Output parameter that receives the total number of pages in the document.
+ * @return Pointer to PopplerDocument on success, NULL on failure (file not found, invalid PDF, etc.).
+ * @note Caller must call g_object_unref() on the returned document when done.
+ * @note Thread-safe.
+ */
+PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pages);
 
 /**
  * Renders a Poppler page to a PDF file using Cairo.
@@ -87,21 +99,21 @@ bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, 
  * This is a convenience function that opens the document, extracts the page,
  * renders it, and cleans up - all in one call to minimize CGo overhead.
  *
- * @param pdf_path Path to the input PDF file.
+ * @param doc PopplerDocument object.
  * @param page_num Zero-based page number to render.
  * @param output_png Path where the output PNG will be written.
  * @return true on success, false on failure (file not found, invalid page number, render error).
  * @note Thread-safe.
  * @note Automatically determines page dimensions and renders at 300 DPI.
  */
-bool render_page_from_document(const char* pdf_path, int page_num, const char* output_png);
+bool render_page_from_document(PopplerDocument* doc, int page_num, const char* output_png);
 
 /**
  * Renders a single page from a PDF document to a PNG buffer in memory.
  * This is a convenience function that opens the document, extracts the page,
  * renders it to memory, and cleans up - all in one call to minimize CGo overhead.
  *
- * @param pdf_path Path to the input PDF file.
+ * @param doc PopplerDocument object.
  * @param page_num Zero-based page number to render.
  * @param out_buffer Output parameter that receives the PNG data. Must not be NULL.
  * @return true on success, false on failure (file not found, invalid page number, render error).
@@ -109,21 +121,21 @@ bool render_page_from_document(const char* pdf_path, int page_num, const char* o
  * @note Automatically determines page dimensions and renders at 300 DPI.
  * @note Caller must free out_buffer->data using free() when done.
  */
-bool render_page_from_document_to_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer);
+bool render_page_from_document_to_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
 
 /**
  * Renders a single page from a PDF document to a PDF file.
  * This is a convenience function that opens the document, extracts the page,
  * renders it, and cleans up - all in one call to minimize CGo overhead.
  *
- * @param pdf_path Path to the input PDF file.
+ * @param doc PopplerDocument object.
  * @param page_num Zero-based page number to render.
  * @param output_pdf Path where the output PDF will be written.
  * @return true on success, false on failure (file not found, invalid page number, render error).
  * @note Thread-safe.
  * @note Output PDF is rendered at 300 DPI resolution.
  */
-bool render_page_to_pdf(const char* pdf_path, int page_num, const char* output_pdf);
+bool render_page_to_pdf(PopplerDocument* doc, int page_num, const char* output_pdf);
 
 typedef struct {
     char* title;
@@ -142,13 +154,12 @@ typedef struct {
 // Helper to free the metadata structure
 void free_pdf_metadata(pdf_metadata_t* meta);
 
-// Get attributes/metadata from the PDF
-bool get_pdf_metadata(const char* filename, pdf_metadata_t* out_meta);
+// Get attributes/metadata from the PDF document.
+void get_pdf_metadata(PopplerDocument* doc, int num_pages, pdf_metadata_t* out_meta);
 
 // Render a specific page to a memory buffer containing a PDF file (Vector)
 bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer);
 
-// Wrapper to open file, render page to PDF buffer, and close
-bool render_page_from_document_to_pdf_buffer(const char* pdf_path, int page_num, pdf_buffer_t* out_buffer);
+bool render_page_from_document_to_pdf_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
 
 #endif /* __PDF_H__ */

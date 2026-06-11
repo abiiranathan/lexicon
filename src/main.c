@@ -3,12 +3,14 @@
 #include <solidc/dotenv.h>
 #include <solidc/flags.h>
 #include <solidc/macros.h>
+#include <vfs.h>
 
 #include "../include/database.h"
 #include "../include/pdf_indexer.h"
 #include "../include/routes.h"
 
 typedef struct {
+    char* vfs_path;   // Path to Virtual File System image containing embedded PDFs.
     char* bind_addr;  // Address to bind to. Default is NULL (0.0.0.0)
     char* pgconn;     // postgres connection string.
     char* root_dir;   // Root Dir of PDFs to index.
@@ -19,6 +21,9 @@ typedef struct {
 
 static AppConfig config = {.port = 8080, .min_pages = 4};
 FlagParser *root = NULL, *indexer = NULL;
+
+// Virtual File System image. (exported to other files)
+vfs_t* vfs = NULL;
 
 // Checks for non-empty postgres connection string.
 void ensure_valid_pgconn_string() {
@@ -36,6 +41,14 @@ void ensure_valid_pgconn_string() {
 // Connect to database before invoking handler.
 static void cli_pre_exec_handler(void* user_data) {
     AppConfig* c = user_data;
+    if (c->vfs_path) {
+        vfs_status_t status = vfs_open(c->vfs_path, true, &vfs);
+        if (status != VFS_OK) {
+            LOG_ERROR("failed to open VFS: %s -- %s", c->vfs_path, vfs_strerror(status));
+            exit(EXIT_FAILURE);
+        }
+    }
+
     ensure_valid_pgconn_string();
     create_connection_pool(c->pgconn);
     create_schema();
@@ -86,6 +99,7 @@ int main(int argc, char* argv[]) {
     flag_int(root, "port", 'p', "The server port", &config.port);
     flag_string(root, "addr", 'a', "Bind address", &config.bind_addr);
     flag_string(root, "pgconn", 'c', "Postgres connection URI", &config.pgconn);
+    flag_string(root, "vfs", 'v', "Path to Virtual File System image (.vfs)", &config.vfs_path);
 
     // Index subcommand and its flags.
     indexer = flag_add_subcommand(root, "index", "Build PDF index into the db", cli_build_pdf_index);

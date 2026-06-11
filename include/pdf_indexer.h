@@ -3,6 +3,7 @@
 
 #include <solidc/filepath.h>
 #include <solidc/flags.h>
+#include <vfs.h>
 #include "database.h"
 
 #ifdef __cplusplus

@@ -9,7 +9,7 @@
       fileId: number,
       pageNum: number,
       numPages: number,
-      fileName: string
+      fileName: string,
     ) => void;
   };
 
@@ -168,7 +168,7 @@
           -displayHeight / 2,
           -displayWidth / 2,
           displayHeight,
-          displayWidth
+          displayWidth,
         );
       } else {
         ctx.drawImage(
@@ -176,7 +176,7 @@
           -displayWidth / 2,
           -displayHeight / 2,
           displayWidth,
-          displayHeight
+          displayHeight,
         );
       }
       ctx.restore();
@@ -231,7 +231,7 @@
           -drawHeight / 2,
           -drawWidth / 2,
           drawHeight,
-          drawWidth
+          drawWidth,
         );
       } else {
         ctx.drawImage(
@@ -239,7 +239,7 @@
           -drawWidth / 2,
           -drawHeight / 2,
           drawWidth,
-          drawHeight
+          drawHeight,
         );
       }
       ctx.restore();
@@ -303,7 +303,7 @@
       const touch2 = e.touches[1];
       lastTouchDistance = Math.hypot(
         touch2.clientX - touch1.clientX,
-        touch2.clientY - touch1.clientY
+        touch2.clientY - touch1.clientY,
       );
     } else if (e.touches.length === 1) {
       isDragging = true;
@@ -321,7 +321,7 @@
       const touch2 = e.touches[1];
       const distance = Math.hypot(
         touch2.clientX - touch1.clientX,
-        touch2.clientY - touch1.clientY
+        touch2.clientY - touch1.clientY,
       );
 
       if (lastTouchDistance > 0) {
@@ -430,7 +430,7 @@
       modalContent.file_id,
       modalContent.page - 1,
       modalContent.num_pages,
-      modalContent?.filename
+      modalContent?.filename,
     );
   };
 
@@ -442,7 +442,7 @@
       modalContent.file_id,
       modalContent.page + 1,
       modalContent.num_pages,
-      modalContent.filename
+      modalContent.filename,
     );
   };
 
@@ -460,7 +460,7 @@
       modalContent.file_id,
       pageNum,
       modalContent.num_pages,
-      modalContent.filename
+      modalContent.filename,
     );
 
     pageInputValue = "";
@@ -473,7 +473,7 @@
       pageInputValue = "";
       setTimeout(() => {
         const input = document.querySelector(
-          ".page-jump-input"
+          ".page-jump-input",
         ) as HTMLInputElement;
         input?.focus();
       }, 0);
@@ -493,7 +493,6 @@
     try {
       const data = await searchAPI(query, {
         fileId: modalContent.file_id,
-        aiEnabled: false, // No AI auto-complete for in-book searches.
       });
       searchResults = data;
     } catch (error: unknown) {
@@ -508,7 +507,7 @@
       result.file_id,
       result.page_num,
       result.num_pages,
-      result.file_name
+      result.file_name,
     );
     searchResults = { results: [] };
     searchQuery = "";
