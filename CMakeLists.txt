@@ -46,11 +46,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${PostgreSQL_INCLUDE_DIRS}
 )
 
-target_compile_options(${PROJECT_NAME} PRIVATE
-    ${POPPLER_GLIB_CFLAGS_OTHER} -Wno-gnu-designator
-)
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE DEFER_AUTOFREE WORKER_COUNT=${WORKER_COUNT})
+target_compile_definitions(${PROJECT_NAME} PRIVATE _DEFAULT_SOURCE WORKER_COUNT=${WORKER_COUNT})
 
 # Enable LTO for Release builds
 if(CMAKE_BUILD_TYPE MATCHES "Release")
