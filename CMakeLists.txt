@@ -5,6 +5,7 @@ project(lexicon VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(WORKER_COUNT "4" CACHE STRING "Number of worker threads")
 
 find_package(PkgConfig REQUIRED)
 find_package(PostgreSQL REQUIRED)
@@ -49,7 +50,7 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     ${POPPLER_GLIB_CFLAGS_OTHER} -Wno-gnu-designator
 )
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE DEFER_AUTOFREE)
+target_compile_definitions(${PROJECT_NAME} PRIVATE DEFER_AUTOFREE WORKER_COUNT=${WORKER_COUNT})
 
 # Enable LTO for Release builds
 if(CMAKE_BUILD_TYPE MATCHES "Release")
