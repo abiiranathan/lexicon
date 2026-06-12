@@ -10,6 +10,11 @@
 extern "C" {
 #endif
 
+/** Number of worker threads and therefore pre-allocated DB connections. */
+#ifndef WORKER_COUNT
+#define WORKER_COUNT 4
+#endif
+
 // Walk the root_dir and insert all PDF pages into the database.
 // If a page is empty or has fewer pages than min_pages, it is skipped.
 // This can be used to filter out small PDF that are not books.

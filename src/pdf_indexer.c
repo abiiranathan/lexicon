@@ -24,9 +24,6 @@ static const char* page_insert_query =
 
 static const char* file_id_query = "SELECT id FROM files WHERE path = $1";
 
-/** Number of worker threads and therefore pre-allocated DB connections. */
-#define WORKER_COUNT 4
-
 // Virtual file system from main.c (if not NULL, indexing reads from VFS)
 extern vfs_t* vfs;
 

@@ -58,6 +58,10 @@ static void cli_pre_exec_handler(void* user_data) {
 // Handler for the index subcommand.
 static void cli_build_pdf_index(void* user_data) {
     AppConfig* appcfg = user_data;
+    if (!vfs && !appcfg->root_dir) {
+        fprintf(stderr, "--root directory must be provided when not using a VFS\n");
+        exit(EXIT_FAILURE);
+    }
     process_pdfs(appcfg->root_dir, appcfg->min_pages, appcfg->dryrun);
     exit(EXIT_SUCCESS);
 }
@@ -103,7 +107,7 @@ int main(int argc, char* argv[]) {
 
     // Index subcommand and its flags.
     indexer = flag_add_subcommand(root, "index", "Build PDF index into the db", cli_build_pdf_index);
-    flag_req_string(indexer, "root", 'r', "Root directory of pdfs", &config.root_dir);
+    flag_string(indexer, "root", 'r', "Root directory of pdfs", &config.root_dir);
     flag_int(indexer, "min_pages", 'p', "Minimum number of pages in PDF", &config.min_pages);
     flag_bool(indexer, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun);
 
