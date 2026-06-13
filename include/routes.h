@@ -32,7 +32,7 @@ void destroy_response_cache(void);
 void get_page_by_file_and_page(PulsarCtx* ctx);
 
 // Renders a PDF page as PNG image.
-void render_pdf_page_as_png(PulsarCtx* ctx);
+void render_pdfpage_as_image(PulsarCtx* ctx);
 
 /**
  * Performs full-text search on PDF pages.

@@ -38,9 +38,7 @@
   let dragStartY = $state(0);
   let rotation = $state(0); // 0, 90, 180, 270
 
-  let searchResults = $state<{ results: SearchResult[] }>({
-    results: [],
-  });
+  let searchResults = $state<{ results: SearchResult[] }>({ results: [] });
   let isSearching = $state(false);
   let searchError = $state<string | null>(null);
 
@@ -50,8 +48,11 @@
       const params = new URLSearchParams(window.location.search);
       params.set("file", modalContent.file_id.toString());
       params.set("page", modalContent.page.toString());
-      const newUrl = `${window.location.pathname}?${params.toString()}`;
-      window.history.replaceState({}, "", newUrl);
+      window.history.replaceState(
+        {},
+        "",
+        `${window.location.pathname}?${params.toString()}`,
+      );
     } else if (!isOpen) {
       const params = new URLSearchParams(window.location.search);
       params.delete("file");
@@ -67,7 +68,164 @@
     document.body.style.overflow = isOpen ? "hidden" : "auto";
   });
 
-  // Load and render image blob to canvas
+  // ---------------------------------------------------------------------------
+  // Canvas rendering
+  //
+  // All drawing goes through renderCanvas(). It is the single source of truth
+  // for what appears on screen. Two concerns are kept strictly separate:
+  //
+  //   1. Sizing  — how big the canvas backing store and CSS box are.
+  //   2. Drawing — painting the image into that sized context.
+  //
+  // DPR handling: the canvas backing store is always (CSS px × devicePixelRatio)
+  // in each dimension. We set canvas.width/height in physical pixels, set
+  // canvas.style.width/height in CSS pixels, then call ctx.scale(dpr, dpr)
+  // ONCE so that every subsequent draw call works in CSS-pixel coordinates.
+  // This produces physically sharp pixels on high-DPI screens.
+  //
+  // imageSmoothingQuality = "high" tells the browser to use a high-quality
+  // downscaling filter (typically a Lanczos variant) when the source image is
+  // larger than the draw destination — important for JPEG pages at 150 DPI
+  // being displayed at screen scale.
+  // ---------------------------------------------------------------------------
+
+  /** Returns true when the current rotation swaps width and height axes. */
+  const isLandscapeRotation = $derived(rotation === 90 || rotation === 270);
+
+  /**
+   * Sizes the canvas backing store to match the container at the current DPR
+   * and configures the 2D context for crisp high-DPI rendering.
+   * Returns the context ready for drawing, or null on failure.
+   */
+  function prepareContext(
+    canvas: HTMLCanvasElement,
+    container: HTMLDivElement,
+    cssWidth: number,
+    cssHeight: number,
+  ): CanvasRenderingContext2D | null {
+    const dpr = window.devicePixelRatio || 1;
+
+    canvas.width = Math.round(cssWidth * dpr);
+    canvas.height = Math.round(cssHeight * dpr);
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
+
+    const ctx = canvas.getContext("2d", { alpha: false });
+    if (!ctx) return null;
+
+    // Map all subsequent draw calls from CSS pixels to physical pixels.
+    ctx.scale(dpr, dpr);
+
+    // High-quality downscaling filter — critical for JPEG source images
+    // rendered at 150 DPI being displayed at a smaller CSS size.
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+
+    return ctx;
+  }
+
+  /**
+   * Draws `img` into `ctx` centered on (`cx`, `cy`), rotated by `deg` degrees,
+   * scaled to (`drawWidth` × `drawHeight`) in the rotated coordinate space.
+   */
+  function drawRotatedImage(
+    ctx: CanvasRenderingContext2D,
+    img: HTMLImageElement,
+    cx: number,
+    cy: number,
+    drawWidth: number,
+    drawHeight: number,
+    deg: number,
+  ): void {
+    const rad = (deg * Math.PI) / 180;
+    const swapped = deg === 90 || deg === 270;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+
+    // When rotated 90/270 the natural image axes are swapped relative to the
+    // draw rectangle, so we pass drawHeight/drawWidth to drawImage instead.
+    const dw = swapped ? drawHeight : drawWidth;
+    const dh = swapped ? drawWidth : drawHeight;
+    ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+
+    ctx.restore();
+  }
+
+  /** Renders the current image into the canvas with all active transforms. */
+  function renderCanvas(): void {
+    if (!canvasElement || !containerElement || !loadedImage) return;
+
+    const canvas = canvasElement;
+    const container = containerElement;
+    const img = loadedImage;
+
+    // Logical image dimensions after accounting for rotation axis swap.
+    const imgW = isLandscapeRotation ? img.height : img.width;
+    const imgH = isLandscapeRotation ? img.width : img.height;
+    const imgAspect = imgW / imgH;
+
+    if (viewMode === "scroll") {
+      // In scroll mode the canvas width is fixed to the container (min 600 px)
+      // and the height follows the image aspect ratio. The user scrolls
+      // vertically to read the page; no zoom/pan state is involved.
+      const cssWidth = Math.max(container.clientWidth, 600);
+      const cssHeight = cssWidth / imgAspect;
+
+      const ctx = prepareContext(canvas, container, cssWidth, cssHeight);
+      if (!ctx) return;
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+      drawRotatedImage(
+        ctx,
+        img,
+        cssWidth / 2,
+        cssHeight / 2,
+        cssWidth,
+        cssHeight,
+        rotation,
+      );
+    } else {
+      // In fit mode the canvas fills the container exactly. The image is
+      // letterboxed to fit, then zoom/pan/rotation transforms are applied
+      // on top so the user can inspect details.
+      const cssWidth = container.clientWidth;
+      const cssHeight = container.clientHeight;
+
+      const ctx = prepareContext(canvas, container, cssWidth, cssHeight);
+      if (!ctx) return;
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cssWidth, cssHeight);
+
+      // Letterbox: fit image inside container preserving aspect ratio.
+      const containerAspect = cssWidth / cssHeight;
+      const drawWidth =
+        imgAspect > containerAspect ? cssWidth : cssHeight * imgAspect;
+      const drawHeight =
+        imgAspect > containerAspect ? cssWidth / imgAspect : cssHeight;
+
+      const cx = cssWidth / 2;
+      const cy = cssHeight / 2;
+
+      ctx.save();
+
+      // Zoom and pan are applied around the canvas centre so that scaling
+      // feels anchored to the middle of the viewport, not the top-left corner.
+      ctx.translate(cx, cy);
+      ctx.scale(scale, scale);
+      ctx.translate(-cx + translateX, -cy + translateY);
+
+      drawRotatedImage(ctx, img, cx, cy, drawWidth, drawHeight, rotation);
+
+      ctx.restore();
+    }
+  }
+
+  // Load image from blob whenever modalContent.imageBlob changes.
   $effect(() => {
     if (!modalContent?.imageBlob || !canvasElement || !containerElement) {
       imageLoaded = false;
@@ -75,11 +233,7 @@
       return;
     }
 
-    const canvas = canvasElement;
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return;
-
-    // Reset transform state when new image loads
+    // Reset transform state for the incoming page.
     scale = 1;
     translateX = 0;
     translateY = 0;
@@ -87,14 +241,15 @@
     imageLoaded = false;
     loadedImage = null;
 
-    const img = new Image();
     const url = URL.createObjectURL(modalContent.imageBlob);
+    const img = new Image();
 
     img.onload = () => {
       loadedImage = img;
       imageLoaded = true;
-      renderCanvas();
       URL.revokeObjectURL(url);
+      // Initial render happens via the render effect below reacting to
+      // imageLoaded becoming true; no explicit call needed here.
     };
 
     img.onerror = () => {
@@ -106,204 +261,73 @@
     img.src = url;
   });
 
-  // Re-render when transform state or view mode changes
+  // Re-render whenever any piece of render state changes. Svelte 5 tracks
+  // which $state variables are read inside an $effect, so listing them
+  // explicitly here (rather than the `void x` hack) is both correct and
+  // readable. renderCanvas() reads: loadedImage, viewMode, scale, translateX,
+  // translateY, rotation, and isLandscapeRotation (derived from rotation).
   $effect(() => {
     if (!imageLoaded || !loadedImage) return;
 
-    // Trigger re-render on state changes
-    void scale;
-    void translateX;
-    void translateY;
-    void viewMode;
-    void rotation;
+    // Reading these here is what makes Svelte track them as dependencies of
+    // this effect. Any change to any of them triggers a re-render.
+    const _ = [scale, translateX, translateY, viewMode, rotation];
+    void _;
 
     renderCanvas();
   });
 
-  // Render image to canvas with current transform
-  function renderCanvas() {
-    if (!canvasElement || !containerElement || !loadedImage) return;
-
-    const canvas = canvasElement;
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return;
-
-    const img = loadedImage;
-    const container = containerElement;
-    const dpr = window.devicePixelRatio || 1;
-
-    // Determine if rotation is 90 or 270 (landscape orientation)
-    const isRotatedLandscape = rotation === 90 || rotation === 270;
-
-    if (viewMode === "scroll") {
-      const containerWidth = container.clientWidth;
-      const minDisplayWidth = 600;
-
-      // Swap width/height calculations if rotated 90 or 270
-      const imgWidth = isRotatedLandscape ? img.height : img.width;
-      const imgHeight = isRotatedLandscape ? img.width : img.height;
-      const imgAspect = imgWidth / imgHeight;
-
-      const displayWidth = Math.max(containerWidth, minDisplayWidth);
-      const displayHeight = displayWidth / imgAspect;
-
-      canvas.width = displayWidth * dpr;
-      canvas.height = displayHeight * dpr;
-      canvas.style.width = `${displayWidth}px`;
-      canvas.style.height = `${displayHeight}px`;
-
-      ctx.scale(dpr, dpr);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, displayWidth, displayHeight);
-
-      // Apply rotation transform
-      ctx.save();
-      ctx.translate(displayWidth / 2, displayHeight / 2);
-      ctx.rotate((rotation * Math.PI) / 180);
-
-      // Draw centered on the rotated canvas
-      if (isRotatedLandscape) {
-        ctx.drawImage(
-          img,
-          -displayHeight / 2,
-          -displayWidth / 2,
-          displayHeight,
-          displayWidth,
-        );
-      } else {
-        ctx.drawImage(
-          img,
-          -displayWidth / 2,
-          -displayHeight / 2,
-          displayWidth,
-          displayHeight,
-        );
-      }
-      ctx.restore();
-    } else {
-      // Fit mode with rotation
-      const canvasWidth = container.clientWidth;
-      const canvasHeight = container.clientHeight;
-
-      canvas.width = canvasWidth * dpr;
-      canvas.height = canvasHeight * dpr;
-      canvas.style.width = `${canvasWidth}px`;
-      canvas.style.height = `${canvasHeight}px`;
-
-      ctx.scale(dpr, dpr);
-
-      // Swap dimensions if rotated 90 or 270
-      const imgWidth = isRotatedLandscape ? img.height : img.width;
-      const imgHeight = isRotatedLandscape ? img.width : img.height;
-      const imgAspect = imgWidth / imgHeight;
-      const canvasAspect = canvasWidth / canvasHeight;
-
-      let drawWidth, drawHeight;
-      if (imgAspect > canvasAspect) {
-        drawWidth = canvasWidth;
-        drawHeight = canvasWidth / imgAspect;
-      } else {
-        drawHeight = canvasHeight;
-        drawWidth = canvasHeight * imgAspect;
-      }
-
-      const baseX = (canvasWidth - drawWidth) / 2;
-      const baseY = (canvasHeight - drawHeight) / 2;
-
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-
-      ctx.save();
-      // Apply zoom and pan first
-      ctx.translate(canvasWidth / 2, canvasHeight / 2);
-      ctx.scale(scale, scale);
-      ctx.translate(-canvasWidth / 2, -canvasHeight / 2);
-      ctx.translate(translateX, translateY);
-
-      // Then apply rotation around the image center
-      ctx.translate(baseX + drawWidth / 2, baseY + drawHeight / 2);
-      ctx.rotate((rotation * Math.PI) / 180);
-
-      // Draw centered on rotation point
-      if (isRotatedLandscape) {
-        ctx.drawImage(
-          img,
-          -drawHeight / 2,
-          -drawWidth / 2,
-          drawHeight,
-          drawWidth,
-        );
-      } else {
-        ctx.drawImage(
-          img,
-          -drawWidth / 2,
-          -drawHeight / 2,
-          drawWidth,
-          drawHeight,
-        );
-      }
-      ctx.restore();
-    }
-  }
-
-  // Handle resize
+  // Re-render on container resize using ResizeObserver, which fires only when
+  // the element's size actually changes — more accurate than window 'resize'
+  // (which misses element-level reflows) and avoids the cost of a global
+  // listener when the modal is closed.
   $effect(() => {
-    if (!isOpen) return;
+    if (!isOpen || !containerElement) return;
 
-    const handleResize = () => {
+    const observer = new ResizeObserver(() => {
       renderCanvas();
-    };
+    });
 
-    window.addEventListener("resize", handleResize);
+    observer.observe(containerElement);
 
-    return () => {
-      window.removeEventListener("resize", handleResize);
-    };
+    return () => observer.disconnect();
   });
 
-  // Handle mouse wheel zoom (only in fit mode)
-  function handleWheel(e: WheelEvent) {
+  // ---------------------------------------------------------------------------
+  // Input handlers
+  // ---------------------------------------------------------------------------
+
+  function handleWheel(e: WheelEvent): void {
     if (viewMode !== "fit") return;
-
     e.preventDefault();
-
-    const delta = -e.deltaY * 0.001;
-    const newScale = Math.max(0.5, Math.min(5, scale + delta));
-
-    scale = newScale;
+    scale = Math.max(0.5, Math.min(5, scale - e.deltaY * 0.001));
   }
 
-  // Handle mouse drag (only in fit mode)
-  function handleMouseDown(e: MouseEvent) {
+  function handleMouseDown(e: MouseEvent): void {
     if (viewMode !== "fit") return;
-
     isDragging = true;
     dragStartX = e.clientX - translateX;
     dragStartY = e.clientY - translateY;
   }
 
-  function handleMouseMove(e: MouseEvent) {
+  function handleMouseMove(e: MouseEvent): void {
     if (viewMode !== "fit" || !isDragging) return;
-
     translateX = e.clientX - dragStartX;
     translateY = e.clientY - dragStartY;
   }
 
-  function handleMouseUp() {
+  function handleMouseUp(): void {
     isDragging = false;
   }
 
-  // Handle touch gestures (only in fit mode)
-  function handleTouchStart(e: TouchEvent) {
+  function handleTouchStart(e: TouchEvent): void {
     if (viewMode !== "fit") return;
 
     if (e.touches.length === 2) {
       e.preventDefault();
-      const touch1 = e.touches[0];
-      const touch2 = e.touches[1];
       lastTouchDistance = Math.hypot(
-        touch2.clientX - touch1.clientX,
-        touch2.clientY - touch1.clientY,
+        e.touches[1].clientX - e.touches[0].clientX,
+        e.touches[1].clientY - e.touches[0].clientY,
       );
     } else if (e.touches.length === 1) {
       isDragging = true;
@@ -312,24 +336,21 @@
     }
   }
 
-  function handleTouchMove(e: TouchEvent) {
+  function handleTouchMove(e: TouchEvent): void {
     if (viewMode !== "fit") return;
 
     if (e.touches.length === 2) {
       e.preventDefault();
-      const touch1 = e.touches[0];
-      const touch2 = e.touches[1];
       const distance = Math.hypot(
-        touch2.clientX - touch1.clientX,
-        touch2.clientY - touch1.clientY,
+        e.touches[1].clientX - e.touches[0].clientX,
+        e.touches[1].clientY - e.touches[0].clientY,
       );
-
       if (lastTouchDistance > 0) {
-        const delta = (distance - lastTouchDistance) * 0.01;
-        const newScale = Math.max(0.5, Math.min(5, scale + delta));
-        scale = newScale;
+        scale = Math.max(
+          0.5,
+          Math.min(5, scale + (distance - lastTouchDistance) * 0.01),
+        );
       }
-
       lastTouchDistance = distance;
     } else if (e.touches.length === 1 && isDragging) {
       e.preventDefault();
@@ -338,39 +359,31 @@
     }
   }
 
-  function handleTouchEnd(e: TouchEvent) {
-    if (e.touches.length < 2) {
-      lastTouchDistance = 0;
-    }
-    if (e.touches.length === 0) {
-      isDragging = false;
-    }
+  function handleTouchEnd(e: TouchEvent): void {
+    if (e.touches.length < 2) lastTouchDistance = 0;
+    if (e.touches.length === 0) isDragging = false;
   }
 
-  // Reset zoom and pan
-  function resetTransform() {
+  function resetTransform(): void {
     scale = 1;
     translateX = 0;
     translateY = 0;
   }
 
-  // Toggle view mode
-  function toggleViewMode() {
+  function toggleViewMode(): void {
     viewMode = viewMode === "fit" ? "scroll" : "fit";
-    if (viewMode === "fit") {
-      resetTransform();
-    }
+    if (viewMode === "fit") resetTransform();
   }
 
-  function rotateImage() {
+  function rotateImage(): void {
     rotation = (rotation + 90) % 360;
   }
 
-  // Handle keyboard shortcuts at document level
+  // Keyboard shortcuts
   $effect(() => {
     if (!isOpen) return;
 
-    const handleKeydown = (e: KeyboardEvent) => {
+    const handleKeydown = (e: KeyboardEvent): void => {
       const target = e.target as HTMLElement;
       if (
         target.tagName === "INPUT" &&
@@ -379,65 +392,78 @@
         return;
       }
 
-      if (e.key === "Escape") {
-        if (showPageInput) {
-          showPageInput = false;
-          pageInputValue = "";
-        } else {
-          onClose();
-        }
-      } else if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        viewPrevPage();
-      } else if (e.key === "ArrowRight") {
-        e.preventDefault();
-        viewNextPage();
-      } else if (e.key === "g" && !showPageInput) {
-        e.preventDefault();
-        togglePageInput();
-      } else if (e.key === "r" && !e.shiftKey) {
-        e.preventDefault();
-        resetTransform();
-      } else if (e.key === "R" || (e.key === "r" && e.shiftKey)) {
-        e.preventDefault();
-        rotateImage();
-      } else if (e.key === "v") {
-        e.preventDefault();
-        toggleViewMode();
-      } else if (viewMode === "fit") {
-        if (e.key === "+" || e.key === "=") {
+      switch (e.key) {
+        case "Escape":
+          if (showPageInput) {
+            showPageInput = false;
+            pageInputValue = "";
+          } else {
+            onClose();
+          }
+          break;
+        case "ArrowLeft":
           e.preventDefault();
-          scale = Math.min(5, scale + 0.2);
-        } else if (e.key === "-") {
+          viewPrevPage();
+          break;
+        case "ArrowRight":
           e.preventDefault();
-          scale = Math.max(0.5, scale - 0.2);
-        }
+          viewNextPage();
+          break;
+        case "g":
+          if (!showPageInput) {
+            e.preventDefault();
+            togglePageInput();
+          }
+          break;
+        case "r":
+          e.preventDefault();
+          if (e.shiftKey) rotateImage();
+          else resetTransform();
+          break;
+        case "R":
+          e.preventDefault();
+          rotateImage();
+          break;
+        case "v":
+          e.preventDefault();
+          toggleViewMode();
+          break;
+        case "+":
+        case "=":
+          if (viewMode === "fit") {
+            e.preventDefault();
+            scale = Math.min(5, scale + 0.2);
+          }
+          break;
+        case "-":
+          if (viewMode === "fit") {
+            e.preventDefault();
+            scale = Math.max(0.5, scale - 0.2);
+          }
+          break;
       }
     };
 
     document.addEventListener("keydown", handleKeydown);
-
-    return () => {
-      document.removeEventListener("keydown", handleKeydown);
-    };
+    return () => document.removeEventListener("keydown", handleKeydown);
   });
 
-  const viewPrevPage = () => {
-    if (!modalContent) return;
-    if (modalContent.page == 1) return;
+  // ---------------------------------------------------------------------------
+  // Page navigation
+  // ---------------------------------------------------------------------------
 
+  const viewPrevPage = (): void => {
+    if (!modalContent || modalContent.page === 1) return;
     viewPage(
       modalContent.file_id,
       modalContent.page - 1,
       modalContent.num_pages,
-      modalContent?.filename,
+      modalContent.filename,
     );
   };
 
-  const viewNextPage = () => {
-    if (!modalContent) return;
-    if (modalContent.page == modalContent.num_pages) return;
-
+  const viewNextPage = (): void => {
+    if (!modalContent || modalContent.page === modalContent.num_pages) return;
     viewPage(
       modalContent.file_id,
       modalContent.page + 1,
@@ -446,7 +472,7 @@
     );
   };
 
-  const handlePageJump = () => {
+  const handlePageJump = (): void => {
     if (!modalContent) return;
 
     const pageNum = parseInt(pageInputValue, 10);
@@ -467,20 +493,23 @@
     showPageInput = false;
   };
 
-  const togglePageInput = () => {
+  const togglePageInput = (): void => {
     showPageInput = !showPageInput;
     if (showPageInput) {
       pageInputValue = "";
       setTimeout(() => {
-        const input = document.querySelector(
-          ".page-jump-input",
-        ) as HTMLInputElement;
-        input?.focus();
+        (
+          document.querySelector(".page-jump-input") as HTMLInputElement
+        )?.focus();
       }, 0);
     }
   };
 
-  async function handleSearch(query: string) {
+  // ---------------------------------------------------------------------------
+  // Search
+  // ---------------------------------------------------------------------------
+
+  async function handleSearch(query: string): Promise<void> {
     if (!query || !modalContent || query.length < 2) {
       searchResults = { results: [] };
       searchError = null;
@@ -491,10 +520,7 @@
     searchError = null;
 
     try {
-      const data = await searchAPI(query, {
-        fileId: modalContent.file_id,
-      });
-      searchResults = data;
+      searchResults = await searchAPI(query, { fileId: modalContent.file_id });
     } catch (error: unknown) {
       searchError = (error as Error).message;
     } finally {
@@ -502,7 +528,7 @@
     }
   }
 
-  const handleResultClick = (result: SearchResult) => {
+  const handleResultClick = (result: SearchResult): void => {
     viewPage(
       result.file_id,
       result.page_num,
@@ -513,7 +539,7 @@
     searchQuery = "";
   };
 
-  function highlightText(text: string) {
+  function highlightText(text: string): string {
     return text
       .replace(/<b>/g, "<mark>")
       .replace(/<\/b>/g, "</mark>")

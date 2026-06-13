@@ -96,7 +96,6 @@ void cleanup() {
 }
 
 int main(int argc, char* argv[]) {
-    // Load .env if exists
     load_dotenv(".env");
     init_app();
     defer_call(cleanup);
@@ -142,7 +141,7 @@ int main(int argc, char* argv[]) {
 
     /* Page detail endpoint */
     route_get("/api/file/{file_id}/page/{page_num}", get_page_by_file_and_page);
-    route_get("/api/file/{file_id}/render-page/{page_num}", render_pdf_page_as_png);
+    route_get("/api/file/{file_id}/render-page/{page_num}", render_pdfpage_as_image);
 
     // Since we are using / for static assets, put at the end to avoid collisions
     printf("Serving SPA at: %s\n", config.frontend_dir);

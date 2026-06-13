@@ -9,6 +9,10 @@ set(WORKER_COUNT "4" CACHE STRING "Number of worker threads")
 
 find_package(PkgConfig REQUIRED)
 find_package(PostgreSQL REQUIRED)
+find_package(JPEG REQUIRED)
+
+message(STATUS "JPEG library: ${JPEG_LIBRARIES}")
+message(STATUS "JPEG include: ${JPEG_INCLUDE_DIRS}")
 
 # This should pull in most dependencies automatically
 pkg_check_modules(POPPLER_GLIB REQUIRED poppler-glib)
@@ -37,6 +41,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     z      # zlib
     ${POPPLER_GLIB_LIBRARIES}
     ${PostgreSQL_LIBRARIES}
+    JPEG::JPEG
     gio-2.0
     pcre2-8
 )

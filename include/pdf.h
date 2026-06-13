@@ -1,165 +1,242 @@
-#ifndef __PDF_H__
-#define __PDF_H__
+#ifndef PDF_H
+#define PDF_H
 
 #include <cairo/cairo-pdf.h>
 #include <cairo/cairo.h>
-#include <locale.h>
 #include <poppler/glib/poppler.h>
-#include <pthread.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <pthread.h>  // for pthread_mutex_t (used in implementation)
+#include <stdbool.h>  // for bool
+#include <stdio.h>    // for fprintf, stderr
+#include <stdlib.h>   // for free
+#include <time.h>     // for time_t
 #include <vfs.h>
-#include <zlib.h>  // for gzip compression
+
+/* ==========================================================================
+ * Types
+ * ========================================================================== */
 
 /**
- * Opens a PDF document and returns a PopplerDocument object.
+ * In-memory buffer holding encoded page data (JPEG, PNG, or PDF).
+ * Ownership of @p data transfers to the caller on successful render;
+ * free with free().
+ */
+typedef struct {
+    unsigned char* data; /** Encoded bytes. Caller must free() after use. */
+    size_t size;         /** Length of @p data in bytes. */
+} pdf_buffer_t;
+
+/**
+ * Metadata extracted from a PDF document.
+ * All string fields are heap-allocated and owned by the caller.
+ * Free the entire struct with free_pdf_metadata().
+ */
+typedef struct {
+    char* title;         /** Document title, or NULL if absent. */
+    char* author;        /** Document author, or NULL if absent. */
+    char* subject;       /** Document subject, or NULL if absent. */
+    char* keywords;      /** Document keywords, or NULL if absent. */
+    char* creator;       /** Creating application, or NULL if absent. */
+    char* producer;      /** PDF producer, or NULL if absent. */
+    char* creation_date; /** Creation date as "YYYY-MM-DD HH:MM:SS", or NULL. */
+    char* mod_date;      /** Modification date as "YYYY-MM-DD HH:MM:SS", or NULL. */
+    char* pdf_version;   /** PDF version string (e.g. "1.7"), or NULL. */
+    int page_count;      /** Total number of pages in the document. */
+    bool is_encrypted;   /** Whether the document is encrypted. */
+} pdf_metadata_t;
+
+/* ==========================================================================
+ * Document lifecycle
+ * ========================================================================== */
+
+/**
+ * Opens a PDF file from disk and returns a PopplerDocument.
  *
- * @param filename Path to the PDF file to open.
- * @param num_pages Output parameter that receives the total number of pages in the document.
- * @return Pointer to PopplerDocument on success, NULL on failure (file not found, invalid PDF, etc.).
- * @note Caller must call g_object_unref() on the returned document when done.
+ * @param filename  Path to the PDF file; must not be NULL.
+ * @param num_pages Output parameter receiving the total page count.
+ * @return Pointer to PopplerDocument on success, NULL on failure.
+ * @note Caller must g_object_unref() the returned document when done.
  * @note Thread-safe.
  */
 PopplerDocument* open_document(const char* filename, int* num_pages);
 
 /**
- * Opens a PDF document from a VFS and returns a PopplerDocument object.
+ * Opens a PDF file from a VFS and returns a PopplerDocument.
  *
- * @param filename Path to the PDF file to open.
- * @param num_pages Output parameter that receives the total number of pages in the document.
- * @return Pointer to PopplerDocument on success, NULL on failure (file not found, invalid PDF, etc.).
- * @note Caller must call g_object_unref() on the returned document when done.
+ * @param vfs      Initialised VFS instance; must not be NULL.
+ * @param vfs_path Path to the PDF file within the VFS; must not be NULL.
+ * @param num_pages Output parameter receiving the total page count.
+ * @return Pointer to PopplerDocument on success, NULL on failure.
+ * @note Caller must g_object_unref() the returned document when done.
  * @note Thread-safe.
  */
 PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pages);
 
-/**
- * Renders a Poppler page to a PDF file using Cairo.
+/* ==========================================================================
+ * JPEG rendering — primary path for HTTP delivery
  *
- * @param page The PopplerPage to render. Must not be NULL.
- * @param output_pdf Path where the output PDF will be written.
- * @return true on success, false on failure (invalid page, I/O error, Cairo error).
- * @note Thread-safe. Uses internal mutex to serialize Cairo operations.
- * @note Output PDF is rendered at 300 DPI resolution.
- */
-bool poppler_page_to_pdf(PopplerPage* page, const char* output_pdf);
+ * JPEG at 96 DPI produces 25–80 KB per page versus 200–500 KB for PNG at
+ * 150 DPI, making it the correct format for serving pages over the network.
+ * ========================================================================== */
 
 /**
- * Renders a PDF page to a PNG image file.
+ * Renders a Poppler page to a JPEG-encoded in-memory buffer.
  *
- * @param page The PopplerPage to render. Must not be NULL.
- * @param width Width of the page in points (72 DPI).
- * @param height Height of the page in points (72 DPI).
- * @param output_file Path where the output PNG will be written.
- * @note Thread-safe. Uses internal mutex to serialize Cairo operations.
- * @note Renders at 300 DPI resolution with white background and no text antialiasing.
- * @note On error, prints diagnostic message to stdout.
+ * @param page       Page to render; must not be NULL.
+ * @param width      Page width in PDF points (from poppler_page_get_size).
+ * @param height     Page height in PDF points.
+ * @param out_buffer Populated on success; caller must free out_buffer->data.
+ * @return true on success, false on any rendering or encoding failure.
+ * @note Thread-safe: acquires an internal Cairo mutex for the render step.
+ */
+bool render_page_to_jpeg_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer);
+
+/**
+ * Renders a page from an open document to a JPEG buffer.
+ *
+ * @param doc        Open PopplerDocument; must not be NULL.
+ * @param page_num   Zero-based page index.
+ * @param out_buffer Populated on success; caller must free out_buffer->data.
+ * @return true on success, false if the page cannot be retrieved or rendered.
+ * @note Thread-safe.
+ */
+bool render_page_from_document_to_jpeg_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
+
+/* ==========================================================================
+ * PNG rendering — lossless path for archival / high-fidelity use
+ * ========================================================================== */
+
+/**
+ * Renders a Poppler page to a PNG-encoded in-memory buffer.
+ *
+ * Prefer the JPEG path for network delivery. Use this where lossless,
+ * pixel-perfect output is required (archival, diffing, cover thumbnails).
+ *
+ * @param page       Page to render; must not be NULL.
+ * @param width      Page width in PDF points.
+ * @param height     Page height in PDF points.
+ * @param out_buffer Populated on success; caller must free out_buffer->data.
+ * @return true on success, false on failure.
+ * @note Thread-safe: acquires an internal Cairo mutex for the render step.
+ */
+bool render_page_to_png_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer);
+
+/**
+ * Renders a page from an open document to a PNG buffer.
+ *
+ * @param doc        Open PopplerDocument; must not be NULL.
+ * @param page_num   Zero-based page index.
+ * @param out_buffer Populated on success; caller must free out_buffer->data.
+ * @return true on success, false on failure.
+ * @note Thread-safe.
+ */
+bool render_page_from_document_to_png_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
+
+/* ==========================================================================
+ * PNG file output — offline / debugging
+ * ========================================================================== */
+
+/**
+ * Renders a Poppler page to a PNG file on disk.
+ *
+ * Intended for debugging and offline use. For HTTP delivery, use
+ * render_page_to_jpeg_buffer instead.
+ *
+ * @param page        Page to render; must not be NULL.
+ * @param width       Page width in PDF points.
+ * @param height      Page height in PDF points.
+ * @param output_file Destination PNG file path; must not be NULL.
+ * @note Thread-safe.
  */
 void render_page_to_image(PopplerPage* page, int width, int height, const char* output_file);
 
 /**
- * Structure to hold in-memory PNG/PDF data.
- * Caller is responsible for freeing the data buffer.
- */
-typedef struct {
-    unsigned char* data; /** Raw PNG/PDF data. Caller must free using free(). */
-    size_t size;         /** Size of the data in bytes. */
-} pdf_buffer_t;
-
-/**
- * Renders a PDF page to a PNG image in memory.
+ * Renders a page from an open document to a PNG file.
  *
- * @param page The PopplerPage to render. Must not be NULL.
- * @param width Width of the page in points (72 DPI).
- * @param height Height of the page in points (72 DPI).
- * @param out_buffer Output parameter that receives the PNG data. Must not be NULL.
- * @return true on success, false on failure (invalid page, allocation error, Cairo error).
- * @note Thread-safe. Uses internal mutex to serialize Cairo operations.
- * @note Renders at 300 DPI resolution with white background and no text antialiasing.
- * @note Caller must free out_buffer->data using free() when done.
- * @note On failure, out_buffer is left unmodified.
- */
-bool render_page_to_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer);
-
-/**
- * Renders a PDF page to a gzip-compressed PNG buffer.
- *
- * @param page The Poppler page to render.
- * @param width The target width in points (72 DPI units).
- * @param height The target height in points (72 DPI units).
- * @param out_buffer Output buffer that will contain gzip-compressed PNG data.
- * @return true on success, false on failure.
- * @note Caller must free out_buffer->data using free() when done.
- */
-bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer);
-
-/**
- * Renders a single page from a PDF document to a PNG file.
- * This is a convenience function that opens the document, extracts the page,
- * renders it, and cleans up - all in one call to minimize CGo overhead.
- *
- * @param doc PopplerDocument object.
- * @param page_num Zero-based page number to render.
- * @param output_png Path where the output PNG will be written.
- * @return true on success, false on failure (file not found, invalid page number, render error).
+ * @param doc        Open PopplerDocument; must not be NULL.
+ * @param page_num   Zero-based page index.
+ * @param output_png Destination PNG file path; must not be NULL.
+ * @return true on success, false if the page cannot be retrieved.
  * @note Thread-safe.
- * @note Automatically determines page dimensions and renders at 300 DPI.
  */
 bool render_page_from_document(PopplerDocument* doc, int page_num, const char* output_png);
 
-/**
- * Renders a single page from a PDF document to a PNG buffer in memory.
- * This is a convenience function that opens the document, extracts the page,
- * renders it to memory, and cleans up - all in one call to minimize CGo overhead.
- *
- * @param doc PopplerDocument object.
- * @param page_num Zero-based page number to render.
- * @param out_buffer Output parameter that receives the PNG data. Must not be NULL.
- * @return true on success, false on failure (file not found, invalid page number, render error).
- * @note Thread-safe.
- * @note Automatically determines page dimensions and renders at 300 DPI.
- * @note Caller must free out_buffer->data using free() when done.
- */
-bool render_page_from_document_to_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
+/* ==========================================================================
+ * Vector PDF buffer rendering
+ * ========================================================================== */
 
 /**
- * Renders a single page from a PDF document to a PDF file.
- * This is a convenience function that opens the document, extracts the page,
- * renders it, and cleans up - all in one call to minimize CGo overhead.
+ * Renders a Poppler page to a PDF-encoded in-memory buffer via Cairo's PDF
+ * surface, preserving vector content rather than rasterising it.
  *
- * @param doc PopplerDocument object.
- * @param page_num Zero-based page number to render.
- * @param output_pdf Path where the output PDF will be written.
- * @return true on success, false on failure (file not found, invalid page number, render error).
+ * Produces the smallest output for text-heavy documents and avoids quality
+ * loss from rasterisation.
+ *
+ * @param page       Page to render; must not be NULL.
+ * @param out_buffer Populated on success; caller must free out_buffer->data.
+ * @return true on success, false on failure.
+ * @note Thread-safe: acquires an internal Cairo mutex for the full operation,
+ *       including the stream-flush on cairo_surface_finish.
+ */
+bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer);
+
+/**
+ * Renders a page from an open document to a PDF buffer.
+ *
+ * @param doc        Open PopplerDocument; must not be NULL.
+ * @param page_num   Zero-based page index.
+ * @param out_buffer Populated on success; caller must free out_buffer->data.
+ * @return true on success, false on failure.
  * @note Thread-safe.
- * @note Output PDF is rendered at 300 DPI resolution.
+ */
+bool render_page_from_document_to_pdf_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
+
+/* ==========================================================================
+ * Single-page PDF file output
+ * ========================================================================== */
+
+/**
+ * Writes a single Poppler page to a PDF file on disk via Cairo.
+ *
+ * @param page       Page to render; must not be NULL.
+ * @param output_pdf Destination PDF file path; must not be NULL.
+ * @return true on success, false on failure.
+ * @note Thread-safe.
+ */
+bool poppler_page_to_pdf(PopplerPage* page, const char* output_pdf);
+
+/**
+ * Renders a page from an open document to a PDF file.
+ *
+ * @param doc        Open PopplerDocument; must not be NULL.
+ * @param page_num   Zero-based page index.
+ * @param output_pdf Destination PDF file path; must not be NULL.
+ * @return true on success, false on failure.
+ * @note Thread-safe.
  */
 bool render_page_to_pdf(PopplerDocument* doc, int page_num, const char* output_pdf);
 
-typedef struct {
-    char* title;
-    char* author;
-    char* subject;
-    char* keywords;
-    char* creator;
-    char* producer;
-    char* creation_date;  // String format
-    char* mod_date;       // String format
-    int page_count;
-    bool is_encrypted;
-    char* pdf_version;
-} pdf_metadata_t;
+/* ==========================================================================
+ * PDF metadata
+ * ========================================================================== */
 
-// Helper to free the metadata structure
-void free_pdf_metadata(pdf_metadata_t* meta);
-
-// Get attributes/metadata from the PDF document.
+/**
+ * Extracts metadata from an open document into @p out_meta.
+ *
+ * All string fields in @p out_meta are heap-allocated. Call
+ * free_pdf_metadata() when done to release them.
+ *
+ * @param doc       Open PopplerDocument; must not be NULL.
+ * @param num_pages Total page count (as returned by open_document).
+ * @param out_meta  Output struct to populate; must not be NULL.
+ */
 void get_pdf_metadata(PopplerDocument* doc, int num_pages, pdf_metadata_t* out_meta);
 
-// Render a specific page to a memory buffer containing a PDF file (Vector)
-bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer);
+/**
+ * Frees all heap-allocated string fields in @p meta and zeroes the struct.
+ * Safe to call on a partially populated struct or NULL.
+ *
+ * @param meta Pointer to the metadata struct to free; may be NULL.
+ */
+void free_pdf_metadata(pdf_metadata_t* meta);
 
-bool render_page_from_document_to_pdf_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
-
-#endif /* __PDF_H__ */
+#endif /* PDF_H */

@@ -15,6 +15,8 @@
   import { useLocalStorage } from "./lib/localstorage.svelte";
   import { SvelteURLSearchParams } from "svelte/reactivity";
 
+  const BASE_URL = import.meta.env.BASE_URL;
+
   let currentTab = useLocalStorage("currentTab", "search");
   let searchQuery = useLocalStorage("search-query", "");
   let fileNameFilter = useLocalStorage("file-name-filter", "");
@@ -221,7 +223,12 @@
   <header class="header">
     <div class="logo-section">
       <a href="/"
-        ><img src="/favicon-96x96.png" alt="Logo" width="96" height="96" /></a
+        ><img
+          src="{BASE_URL}favicon-96x96.png"
+          alt="Logo"
+          width="96"
+          height="96"
+        /></a
       >
       <div class="logo-text">
         <h1><a href="/">Lexicon</a></h1>

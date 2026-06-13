@@ -247,35 +247,20 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
 typedef bool (*PageRenderFunc)(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer);
 
 /**
- * GET /files/:file_id/pages/:page_num/render?type=[png|pdf]
+ * GET /files/:file_id/pages/:page_num/render
  *
- * Renders a single PDF page as either a PNG image or a single-page PDF.
+ * Renders a single PDF page as either a JPEG image.
  * The rendered bytes are cached for one hour.
  *
  * Path parameters:
  *   file_id  - Integer database identifier of the file.
  *   page_num - 1-based page number.
  *
- * Query parameters:
- *   type - "png" (default) or "pdf".
  */
-void render_pdf_page_as_png(PulsarCtx* ctx) {
-    static const char* type_png = "png";
-    static const char* type_pdf = "pdf";
-    bool is_png = true, is_pdf = false;
+void render_pdfpage_as_image(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     require_path_param(file_id_str, conn, "file_id");
     require_path_param(page_num_str, conn, "page_num");
-
-    const char* type = query_get(conn, "type");
-    if (!type) type = type_png;
-    is_png = strcmp(type, type_png) == 0;
-    is_pdf = strcmp(type, type_pdf) == 0;
-
-    if (!(is_png || is_pdf)) {
-        send_json_error(conn, "type query parameter must be either 'png' or 'pdf'");
-        return;
-    }
 
     int64_t file_id = 0;
     int page = 0;
@@ -290,21 +275,17 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     }
 
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
-    size_t key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d:type:%s",
-                                      (long long)file_id, page, type);
+    size_t key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d", (long long)file_id,
+                                      page);
 
-    static const char png_headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
-    static const char pdf_headers
-        [] = "Content-Type: application/pdf\r\nCache-Control: public, "
-             "max-age=3600\r\n";
+    static const char headers[] = "Content-Type: image/jpeg\r\nCache-Control: public, max-age=3600\r\n";
 
     /* Serve from cache if available. */
     size_t cached_len = 0;
     const char* cached_data = cache_get(g_res_cache, cache_key, key_len, &cached_len);
     if (cached_data) {
-        const char* hdrs = is_png ? png_headers : pdf_headers;
-        size_t length = is_png ? sizeof(png_headers) - 1 : sizeof(pdf_headers) - 1;
-        conn_writeheader_raw(conn, hdrs, length);
+        size_t length = sizeof(headers) - 1;
+        conn_writeheader_raw(conn, headers, length);
         conn_write(conn, cached_data, cached_len);
         cache_release(cached_data);
         return;
@@ -321,20 +302,9 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
     HANDLE_RECORD_NOT_FOUND(res, conn, "No file found for the requested file");
 
     const char* path = PQgetvalue(res, 0, 0);
-    PageRenderFunc renderer = NULL;
-    const char* hdrs = NULL;
+    conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
 
-    if (is_png) {
-        renderer = render_page_from_document_to_buffer;
-        hdrs = png_headers;
-    } else {
-        renderer = render_page_from_document_to_pdf_buffer;
-        hdrs = pdf_headers;
-    }
-
-    pdf_buffer_t byte_buf = {0};
-    conn_writeheader_raw(conn, hdrs, strlen(hdrs));
-
+    // Generic open.
     int num_pages;
     PopplerDocument* doc = gen_open_document(path, &num_pages);
     if (!doc) {
@@ -347,14 +317,16 @@ void render_pdf_page_as_png(PulsarCtx* ctx) {
         return;
     }
 
-    if (renderer(doc, page - 1, &byte_buf)) {
-        conn_write(conn, byte_buf.data, byte_buf.size);
-        /* TTL of 60 s for rendered page images. */
-        cache_set(g_res_cache, cache_key, key_len, byte_buf.data, byte_buf.size, 60);
-    } else {
-        conn_set_status(conn, StatusInternalServerError);
-        send_json_error(conn, "Error rendering page");
-    }
+    PopplerPage* ppage = poppler_document_get_page(doc, page - 1);
+    pdf_buffer_t buf = {0};
+    double width, height;
+    poppler_page_get_size(ppage, &width, &height);
+    render_page_to_jpeg_buffer(ppage, (int)width, (int)height, &buf);
+
+    conn_write(conn, buf.data, buf.size);
+
+    /* TTL of 60 s for rendered page images. */
+    cache_set(g_res_cache, cache_key, key_len, buf.data, buf.size, 60);
 }
 
 /**

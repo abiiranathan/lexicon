@@ -1,20 +1,117 @@
 #include "../include/pdf.h"
+#include <jerror.h>   // for JMSG_LENGTH_MAX
+#include <jpeglib.h>  // for jpeg_compress_struct, jpeg_mem_dest, etc.
+#include <setjmp.h>   // for jmp_buf, setjmp, longjmp
 #include <solidc/defer.h>
-#include <string.h>
+#include <stdint.h>   // for uint32_t
+#include <string.h>   // for memcpy, memset
 
-/** Global mutex to serialize Cairo operations (Cairo is not fully thread-safe). */
+/* ==========================================================================
+ * Cairo serialization mutex
+ *
+ * Poppler's rendering path writes into a Cairo surface; the surface itself
+ * is not reference-counted for concurrent writers.  A single global mutex
+ * is the correct granularity: we hold it from surface creation through the
+ * final cairo_surface_finish / cairo_surface_destroy so that no two threads
+ * ever touch Cairo objects simultaneously.
+ * ========================================================================== */
+/* ==========================================================================
+ * Constants
+ * ========================================================================== */
+
+/** Rendering resolution for screen display (pixels per inch). */
+static const double SCREEN_RESOLUTION = 150.0;
+
+/** JPEG encode quality  */
+static const int JPEG_QUALITY = 150;
+
+/** Global mutex serializing all Cairo/Poppler rendering operations. */
 static pthread_mutex_t cairo_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/** Cleanup function to destroy the mutex on program exit. */
-__attribute__((destructor)) void destroy_cairo_mutex(void) {
+/** Destroys the Cairo mutex at process exit. */
+__attribute__((destructor)) static void destroy_cairo_mutex(void) {
     pthread_mutex_destroy(&cairo_mutex);
 }
 
-#define LOCK_CAIRO_MUTEX()   pthread_mutex_lock(&cairo_mutex)
-#define UNLOCK_CAIRO_MUTEX() pthread_mutex_unlock(&cairo_mutex)
+#define LOCK_CAIRO()   pthread_mutex_lock(&cairo_mutex)
+#define UNLOCK_CAIRO() pthread_mutex_unlock(&cairo_mutex)
 
-/** Default rendering resolution in DPI. */
-static const double DEFAULT_RESOLUTION = 300.0;
+/* ==========================================================================
+ * Cairo write callback — plain memory buffer
+ * ========================================================================== */
+
+/**
+ * Collects raw bytes emitted by a Cairo write stream into a growable heap
+ * buffer.  Used for PDF-to-PDF (vector) buffer rendering.
+ */
+typedef struct {
+    unsigned char* data; /** Dynamically allocated buffer; NULL until first write. */
+    size_t size;         /** Bytes written so far. */
+    size_t capacity;     /** Total allocated capacity. */
+} cairo_membuf_t;
+
+/**
+ * Cairo write-stream callback that appends @p length bytes of @p data to the
+ * buffer held in @p closure.
+ *
+ * @param closure Pointer to a cairo_membuf_t.
+ * @param data    Bytes to append; must not be NULL.
+ * @param length  Number of bytes to append.
+ * @return CAIRO_STATUS_SUCCESS, or CAIRO_STATUS_WRITE_ERROR on allocation
+ *         failure.
+ */
+static cairo_status_t membuf_write(void* closure, const unsigned char* data, unsigned int length) {
+    cairo_membuf_t* buf = (cairo_membuf_t*)closure;
+
+    size_t required = buf->size + (size_t)length;
+    if (required > buf->capacity) {
+        size_t new_cap = buf->capacity == 0 ? 65536 : buf->capacity * 2;
+        while (new_cap < required) {
+            new_cap *= 2;
+        }
+
+        unsigned char* p = realloc(buf->data, new_cap);
+        if (p == NULL) { return CAIRO_STATUS_WRITE_ERROR; }
+        buf->data = p;
+        buf->capacity = new_cap;
+    }
+
+    memcpy(buf->data + buf->size, data, length);
+    buf->size += (size_t)length;
+    return CAIRO_STATUS_SUCCESS;
+}
+
+/** Releases any memory held by @p buf.  Safe to call on a zero-initialised
+ *  struct. */
+static void membuf_free(cairo_membuf_t* buf) {
+    free(buf->data);
+    buf->data = NULL;
+    buf->size = 0;
+    buf->capacity = 0;
+}
+
+/* ==========================================================================
+ * libjpeg error manager
+ * ========================================================================== */
+
+/**
+ * Extended libjpeg error manager that longjmps on fatal errors rather than
+ * calling exit(), allowing the caller to handle errors gracefully.
+ */
+typedef struct {
+    struct jpeg_error_mgr base; /** Must be the first member (libjpeg ABI). */
+    jmp_buf escape;             /** Jump target set by the caller via setjmp. */
+} jpeg_err_ex_t;
+
+/** @private libjpeg error_exit hook — longjmps into the caller's setjmp. */
+static void jpeg_error_exit_ex(j_common_ptr cinfo) {
+    jpeg_err_ex_t* err = (jpeg_err_ex_t*)cinfo->err;
+    longjmp(err->escape, 1);
+}
+
+/* ==========================================================================
+ * Document open helpers
+ * ========================================================================== */
 
 PopplerDocument* open_document(const char* filename, int* num_pages) {
     if (filename == NULL || num_pages == NULL) {
@@ -39,20 +136,19 @@ PopplerDocument* open_document(const char* filename, int* num_pages) {
     }
 
     PopplerDocument* doc = poppler_document_new_from_bytes(bytes, NULL, &error);
+    g_bytes_unref(bytes);
+
     if (error != NULL) {
         fprintf(stderr, "Error creating Poppler document: %s\n", error->message);
         g_clear_error(&error);
-        g_bytes_unref(bytes);
         return NULL;
     }
 
     *num_pages = poppler_document_get_n_pages(doc);
-    g_bytes_unref(bytes);
     return doc;
 }
 
 PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pages) {
-    /* Open target path inside VFS */
     vfs_fd_t fd = vfs_fopen(vfs, vfs_path, VFS_O_RDONLY);
     if (fd < 0) {
         fprintf(stderr, "Error opening VFS path %s: %s\n", vfs_path, vfs_strerror((vfs_status_t)fd));
@@ -62,7 +158,6 @@ PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pa
         vfs_fclose(vfs, fd);
     };
 
-    /* Retrieve file statistics to get size */
     vfs_stat_t st;
     vfs_status_t status = vfs_stat(vfs, vfs_path, &st);
     if (status != VFS_OK) {
@@ -70,20 +165,18 @@ PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pa
         return NULL;
     }
 
-    /* Use GLib's g_try_malloc to safely allocate memory for ownership transfer */
+    /* g_try_malloc so GBytes can take ownership without an extra copy. */
     char* buffer = g_try_malloc(st.size);
-    if (!buffer) {
-        fprintf(stderr, "Error: Failed to allocate memory of size %lu\n", (unsigned long)st.size);
+    if (buffer == NULL) {
+        fprintf(stderr, "Error: Failed to allocate %lu bytes for VFS read\n", (unsigned long)st.size);
         return NULL;
     }
 
-    /* Safety fallback: if we return before transferring ownership to GBytes, free buffer */
     bool ownership_transferred = false;
     defer {
         if (!ownership_transferred) { g_free(buffer); }
     };
 
-    /* Read VFS data blocks into buffer */
     size_t bytes_read = 0;
     status = vfs_fread(vfs, fd, buffer, st.size, &bytes_read);
     if (status != VFS_OK) {
@@ -91,19 +184,16 @@ PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pa
         return NULL;
     }
 
-    /* Zero-copy allocation wrapper: GBytes assumes ownership of 'buffer' directly */
     GBytes* bytes = g_bytes_new_take(buffer, st.size);
     ownership_transferred = true;
-
-    /* Guarantee that GBytes is unreferenced on every subsequent exit path */
     defer {
         g_bytes_unref(bytes);
     };
 
     GError* error = NULL;
     PopplerDocument* doc = poppler_document_new_from_bytes(bytes, NULL, &error);
-    if (!doc) {
-        if (error) {
+    if (doc == NULL) {
+        if (error != NULL) {
             fprintf(stderr, "Error opening doc from bytes: %s\n", error->message);
             g_clear_error(&error);
         } else {
@@ -112,500 +202,511 @@ PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pa
         return NULL;
     }
 
-    /* Correctly populate output parameter */
     *num_pages = poppler_document_get_n_pages(doc);
-
     return doc;
 }
 
-void render_page_to_image(PopplerPage* page, int width, int height, const char* output_file) {
-    // Calculate pixel dimensions at the target resolution
-    int pixel_width = (int)(width * DEFAULT_RESOLUTION / 72.0);
-    int pixel_height = (int)(height * DEFAULT_RESOLUTION / 72.0);
+/* ==========================================================================
+ * Internal rendering primitive
+ *
+ * Renders a Poppler page into a Cairo RGB24 image surface.  The caller owns
+ * the returned surface (and must cairo_surface_destroy it).  The Cairo mutex
+ * must NOT be held by the caller; this function acquires and releases it
+ * internally for the full rendering operation including surface creation.
+ * ========================================================================== */
 
-    LOCK_CAIRO_MUTEX();
+/**
+ * Renders @p page into a newly created Cairo RGB24 image surface.
+ *
+ * @param page         Poppler page to render.
+ * @param pixel_width  Output image width in pixels.
+ * @param pixel_height Output image height in pixels.
+ * @param pt_width     Page width in PDF points (for scale calculation).
+ * @param pt_height    Page height in PDF points (for scale calculation).
+ * @return Newly allocated cairo_surface_t on success, NULL on failure.
+ *         Caller must cairo_surface_destroy() the returned surface.
+ * @note Acquires and releases the global Cairo mutex internally.
+ */
+static cairo_surface_t* render_page_to_surface(PopplerPage* page, int pixel_width, int pixel_height, double pt_width,
+                                               double pt_height) {
+    LOCK_CAIRO();
 
-    // Create the Cairo image surface
     cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, pixel_width, pixel_height);
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create Cairo surface\n");
-        UNLOCK_CAIRO_MUTEX();
-        return;
+        fprintf(stderr, "Error: Failed to create Cairo image surface\n");
+        cairo_surface_destroy(surface);
+        UNLOCK_CAIRO();
+        return NULL;
     }
 
     cairo_t* cr = cairo_create(surface);
     if (cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
         fprintf(stderr, "Error: Failed to create Cairo context\n");
+        cairo_destroy(cr);
         cairo_surface_destroy(surface);
-        UNLOCK_CAIRO_MUTEX();
-        return;
+        UNLOCK_CAIRO();
+        return NULL;
     }
 
-    // Set white background
+    /* White background. */
     cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
     cairo_paint(cr);
 
-    // Disable text antialiasing for sharper rendering
-    cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+    /* Scale from PDF points to pixels. */
+    cairo_scale(cr, (double)pixel_width / pt_width, (double)pixel_height / pt_height);
 
-    // Scale to maintain aspect ratio
-    double scale_x = (double)pixel_width / width;
-    double scale_y = (double)pixel_height / height;
-    cairo_scale(cr, scale_x, scale_y);
-
-    // Render the PDF page
     poppler_page_render(page, cr);
 
-    UNLOCK_CAIRO_MUTEX();
-
-    // Write to PNG file
-    cairo_status_t status = cairo_surface_write_to_png(surface, output_file);
-    if (status != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Could not write PNG file: %s\n", cairo_status_to_string(status));
-    }
+    /* Flush ensures pixel data is coherent before we read it. */
+    cairo_surface_flush(surface);
 
     cairo_destroy(cr);
-    cairo_surface_destroy(surface);
+
+    /* Surface stays alive; caller must destroy it.
+     * We hold the lock until the context is destroyed and the surface
+     * is flushed — any further access by the caller is to pixel memory
+     * that is now stable, so unlocking here is safe. */
+    UNLOCK_CAIRO();
+
+    return surface;
 }
 
-/**
- * Internal structure used for collecting PNG data from Cairo's write callback.
- */
-typedef struct {
-    unsigned char* data; /** Dynamically allocated buffer. */
-    size_t size;         /** Current size of used data. */
-    size_t capacity;     /** Total allocated capacity. */
-} cairo_write_context_t;
+/* ==========================================================================
+ * JPEG rendering — primary path for network delivery
+ * ========================================================================== */
 
 /**
- * Cairo write callback that appends data to a dynamically growing buffer.
+ * Renders a Poppler page to a JPEG-encoded in-memory buffer.
  *
- * @param closure Pointer to cairo_write_context_t.
- * @param data Data to write.
- * @param length Length of data in bytes.
- * @return CAIRO_STATUS_SUCCESS on success, CAIRO_STATUS_WRITE_ERROR on allocation failure.
+ * JPEG produces files 5–10× smaller than PNG at equivalent perceptual quality
+ * for rendered document pages, making it the preferred format for HTTP
+ * delivery.  The encoded bytes are owned by the caller via @p out_buffer.
+ *
+ * @param page      Poppler page to render; must not be NULL.
+ * @param width     Page width in PDF points (from poppler_page_get_size).
+ * @param height    Page height in PDF points.
+ * @param out_buffer Output buffer populated on success.  Caller must free
+ *                   out_buffer->data with free().
+ * @return true on success, false on any rendering or encoding failure.
+ * @note Thread-safe: acquires the global Cairo mutex internally.
  */
-static cairo_status_t cairo_write_to_buffer(void* closure, const unsigned char* data, unsigned int length) {
-    cairo_write_context_t* ctx = (cairo_write_context_t*)closure;
+bool render_page_to_jpeg_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
+    if (page == NULL || out_buffer == NULL) { return false; }
 
-    // Ensure we have enough capacity
-    size_t required = ctx->size + length;
-    if (required > ctx->capacity) {
-        // Grow buffer by doubling capacity
-        size_t new_capacity = ctx->capacity == 0 ? 4096 : ctx->capacity * 2;
-        while (new_capacity < required) {
-            new_capacity *= 2;
+    int pixel_width = (int)(width * SCREEN_RESOLUTION / 72.0);
+    int pixel_height = (int)(height * SCREEN_RESOLUTION / 72.0);
+
+    cairo_surface_t* surface = render_page_to_surface(page, pixel_width, pixel_height, (double)width, (double)height);
+    if (surface == NULL) { return false; }
+
+    /* Cairo RGB24 pixel layout: 0x00RRGGBB packed into a uint32_t in native
+     * byte order, with stride padding to a 4-byte boundary per row.  We must
+     * unpack to a packed 3-byte RGB row that libjpeg expects. */
+    const unsigned char* pixels = cairo_image_surface_get_data(surface);
+    const int stride = cairo_image_surface_get_stride(surface);
+
+    /* Scratch buffer for one unpacked RGB scanline. */
+    unsigned char* row_rgb = malloc((size_t)pixel_width * 3);
+    if (row_rgb == NULL) {
+        fprintf(stderr, "Error: Failed to allocate JPEG scanline buffer\n");
+        cairo_surface_destroy(surface);
+        return false;
+    }
+
+    /* --- libjpeg setup ---------------------------------------------------- */
+    struct jpeg_compress_struct cinfo;
+    jpeg_err_ex_t jerr;
+    cinfo.err = jpeg_std_error(&jerr.base);
+    jerr.base.error_exit = jpeg_error_exit_ex;
+
+    unsigned char* jpeg_data = NULL;
+    unsigned long jpeg_size = 0;
+    bool success = false;
+
+    /* libjpeg calls error_exit on fatal errors, which longjmps here. */
+    if (setjmp(jerr.escape)) {
+        char msg[JMSG_LENGTH_MAX];
+        (*cinfo.err->format_message)((j_common_ptr)&cinfo, msg);
+        fprintf(stderr, "Error: libjpeg: %s\n", msg);
+        jpeg_destroy_compress(&cinfo);
+        free(jpeg_data);
+        goto cleanup;
+    }
+
+    jpeg_create_compress(&cinfo);
+
+    /* jpeg_mem_dest allocates the output buffer via its own allocator.
+     * We copy to a malloc-owned buffer afterwards so callers can free()
+     * uniformly regardless of how the buffer was produced. */
+    jpeg_mem_dest(&cinfo, &jpeg_data, &jpeg_size);
+
+    cinfo.image_width = (JDIMENSION)pixel_width;
+    cinfo.image_height = (JDIMENSION)pixel_height;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, JPEG_QUALITY, TRUE);
+
+    /* 4:2:0 chroma subsampling: visually transparent for document pages and
+     * reduces file size by ~15% versus 4:4:4. */
+    cinfo.comp_info[0].h_samp_factor = 2;
+    cinfo.comp_info[0].v_samp_factor = 2;
+
+    jpeg_start_compress(&cinfo, TRUE);
+
+    while (cinfo.next_scanline < cinfo.image_height) {
+        const uint32_t* src = (const uint32_t*)(pixels + (size_t)cinfo.next_scanline * (size_t)stride);
+
+        for (int x = 0; x < pixel_width; x++) {
+            uint32_t px = src[x];
+            row_rgb[x * 3 + 0] = (unsigned char)((px >> 16) & 0xFF); /* R */
+            row_rgb[x * 3 + 1] = (unsigned char)((px >> 8) & 0xFF);  /* G */
+            row_rgb[x * 3 + 2] = (unsigned char)((px >> 0) & 0xFF);  /* B */
         }
 
-        unsigned char* new_data = realloc(ctx->data, new_capacity);
-        if (new_data == NULL) { return CAIRO_STATUS_WRITE_ERROR; }
-
-        ctx->data = new_data;
-        ctx->capacity = new_capacity;
+        JSAMPROW row_ptr = row_rgb;
+        jpeg_write_scanlines(&cinfo, &row_ptr, 1);
     }
 
-    // Copy data to buffer
-    memcpy(ctx->data + ctx->size, data, length);
-    ctx->size += length;
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
 
-    return CAIRO_STATUS_SUCCESS;
-}
-
-bool render_page_to_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
-    // Calculate pixel dimensions at the target resolution
-    int pixel_width = (int)(width * DEFAULT_RESOLUTION / 72.0);
-    int pixel_height = (int)(height * DEFAULT_RESOLUTION / 72.0);
-
-    LOCK_CAIRO_MUTEX();
-
-    // Create the Cairo image surface
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
-    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create Cairo surface\n");
-        UNLOCK_CAIRO_MUTEX();
-        return false;
+    /* Copy from libjpeg's allocator to a malloc-owned buffer. */
+    out_buffer->data = malloc(jpeg_size);
+    if (out_buffer->data == NULL) {
+        fprintf(stderr, "Error: Failed to allocate JPEG output buffer\n");
+        free(jpeg_data);
+        goto cleanup;
     }
+    memcpy(out_buffer->data, jpeg_data, jpeg_size);
+    out_buffer->size = (size_t)jpeg_size;
+    free(jpeg_data);
+    success = true;
 
-    cairo_t* cr = cairo_create(surface);
-    if (cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create Cairo context\n");
-        cairo_surface_destroy(surface);
-        UNLOCK_CAIRO_MUTEX();
-        return false;
-    }
-
-    // Set white background
-    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-    cairo_paint(cr);
-
-    // Disable text antialiasing for sharper rendering
-    cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
-
-    // Scale to maintain aspect ratio
-    double scale_x = (double)pixel_width / width;
-    double scale_y = (double)pixel_height / height;
-    cairo_scale(cr, scale_x, scale_y);
-
-    // Render the PDF page
-    poppler_page_render(page, cr);
-
-    UNLOCK_CAIRO_MUTEX();
-
-    // Initialize write context for collecting PNG data
-    cairo_write_context_t write_ctx = {.data = NULL, .size = 0, .capacity = 0};
-
-    // Write PNG to memory buffer
-    cairo_status_t status = cairo_surface_write_to_png_stream(surface, cairo_write_to_buffer, &write_ctx);
-
-    cairo_destroy(cr);
+cleanup:
+    free(row_rgb);
     cairo_surface_destroy(surface);
-
-    if (status != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Could not write PNG to buffer: %s\n", cairo_status_to_string(status));
-        free(write_ctx.data);
-        return false;
-    }
-
-    // Transfer ownership to caller
-    out_buffer->data = write_ctx.data;
-    out_buffer->size = write_ctx.size;
-
-    return true;
+    return success;
 }
 
-bool render_page_from_document(PopplerDocument* doc, int page_num, const char* output_png) {
+/**
+ * Renders a page from an open document to a JPEG buffer.
+ *
+ * @param doc      Open Poppler document; must not be NULL.
+ * @param page_num Zero-based page index.
+ * @param out_buffer Output buffer populated on success.
+ * @return true on success, false if the page cannot be retrieved or rendered.
+ */
+bool render_page_from_document_to_jpeg_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer) {
     PopplerPage* page = poppler_document_get_page(doc, page_num);
-    if (!page) { return false; }
-    double width, height;
-    poppler_page_get_size(page, &width, &height);
-    render_page_to_image(page, (int)width, (int)height, output_png);
-    g_object_unref(page);
-    return false;
-}
-
-bool render_page_from_document_to_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer) {
-    PopplerPage* page = poppler_document_get_page(doc, page_num);
-    if (!page) { return false; }
+    if (page == NULL) { return false; }
 
     double width, height;
     poppler_page_get_size(page, &width, &height);
-    bool result = render_page_to_buffer(page, (int)width, (int)height, out_buffer);
+    bool result = render_page_to_jpeg_buffer(page, (int)width, (int)height, out_buffer);
     g_object_unref(page);
     return result;
 }
 
-bool poppler_page_to_pdf(PopplerPage* page, const char* output_pdf) {
-    double width, height;
-    poppler_page_get_size(page, &width, &height);
-
-    int pixel_width = (int)(width * DEFAULT_RESOLUTION / 72.0);
-    int pixel_height = (int)(height * DEFAULT_RESOLUTION / 72.0);
-
-    LOCK_CAIRO_MUTEX();
-
-    cairo_surface_t* surface = cairo_pdf_surface_create(output_pdf, pixel_width, pixel_height);
-    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create PDF surface\n");
-        UNLOCK_CAIRO_MUTEX();
-        return false;
-    }
-
-    cairo_t* cr = cairo_create(surface);
-    if (cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create Cairo context\n");
-        cairo_surface_destroy(surface);
-        UNLOCK_CAIRO_MUTEX();
-        return false;
-    }
-
-    // Set white background
-    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-    cairo_paint(cr);
-
-    // Scale to maintain aspect ratio
-    cairo_scale(cr, (double)pixel_width / width, (double)pixel_height / height);
-
-    // Render the PDF page
-    poppler_page_render(page, cr);
-
-    cairo_surface_finish(surface);
-    cairo_destroy(cr);
-    cairo_surface_destroy(surface);
-
-    UNLOCK_CAIRO_MUTEX();
-    return true;
-}
-
-bool render_page_to_pdf(PopplerDocument* doc, int page_num, const char* output_pdf) {
-    PopplerPage* page = poppler_document_get_page(doc, page_num);
-    if (page) {
-        bool status = poppler_page_to_pdf(page, output_pdf);
-        g_object_unref(page);
-        return status;
-    }
-    return false;
-}
-
-// GZIP compression of DOCUMENT into PNG
-//====================================================
-/**
- * Context structure for streaming gzip compression during Cairo PNG writing.
- */
-typedef struct {
-    z_stream stream;     /** zlib compression stream state. */
-    unsigned char* data; /** Dynamically allocated compressed buffer. */
-    size_t size;         /** Current size of compressed data. */
-    size_t capacity;     /** Total allocated capacity. */
-    bool initialized;    /** Whether zlib stream has been initialized. */
-    bool error_occurred; /** Flag to track if compression error occurred. */
-} cairo_gzip_write_context_t;
+/* ==========================================================================
+ * PNG rendering — lossless path, useful for archival or high-fidelity use
+ * ========================================================================== */
 
 /**
- * Cairo write callback that compresses PNG data with gzip on-the-fly.
+ * Renders a Poppler page to a PNG-encoded in-memory buffer.
  *
- * @param closure Pointer to cairo_gzip_write_context_t.
- * @param data PNG data chunk to compress.
- * @param length Length of data in bytes.
- * @return CAIRO_STATUS_SUCCESS on success, CAIRO_STATUS_WRITE_ERROR on failure.
- */
-static cairo_status_t cairo_write_to_gzip_buffer(void* closure, const unsigned char* data, unsigned int length) {
-    cairo_gzip_write_context_t* ctx = (cairo_gzip_write_context_t*)closure;
-
-    if (ctx->error_occurred) { return CAIRO_STATUS_WRITE_ERROR; }
-
-    // Initialize deflate stream on first call
-    if (!ctx->initialized) {
-        ctx->stream = (z_stream){0};
-        // windowBits = 15 + 16 for gzip format
-        // int ret = deflateInit2(&ctx->stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
-        int ret = deflateInit2(&ctx->stream, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
-        if (ret != Z_OK) {
-            fprintf(stderr, "Error: Failed to initialize gzip compression: %d\n", ret);
-            ctx->error_occurred = true;
-            return CAIRO_STATUS_WRITE_ERROR;
-        }
-        ctx->initialized = true;
-
-        // Initialize buffer with reasonable starting capacity
-        ctx->capacity = 8192;
-        ctx->data = malloc(ctx->capacity);
-        if (ctx->data == NULL) {
-            deflateEnd(&ctx->stream);
-            ctx->error_occurred = true;
-            return CAIRO_STATUS_WRITE_ERROR;
-        }
-    }
-
-    // Set input for this chunk
-    ctx->stream.next_in = (unsigned char*)data;
-    ctx->stream.avail_in = length;
-
-    // Compress input data
-    while (ctx->stream.avail_in > 0) {
-        // Ensure we have output space
-        if (ctx->size >= ctx->capacity) {
-            size_t new_capacity = ctx->capacity * 2;
-            unsigned char* new_data = realloc(ctx->data, new_capacity);
-            if (new_data == NULL) {
-                ctx->error_occurred = true;
-                return CAIRO_STATUS_WRITE_ERROR;
-            }
-            ctx->data = new_data;
-            ctx->capacity = new_capacity;
-        }
-
-        ctx->stream.next_out = ctx->data + ctx->size;
-        ctx->stream.avail_out = (uInt)(ctx->capacity - ctx->size);
-
-        int ret = deflate(&ctx->stream, Z_NO_FLUSH);
-        if (ret != Z_OK) {
-            fprintf(stderr, "Error: Compression failed during deflate: %d\n", ret);
-            ctx->error_occurred = true;
-            return CAIRO_STATUS_WRITE_ERROR;
-        }
-
-        // Update size based on how much was written
-        ctx->size = ctx->capacity - ctx->stream.avail_out;
-    }
-
-    return CAIRO_STATUS_SUCCESS;
-}
-
-/**
- * Finalizes gzip compression and ensures all data is flushed.
+ * Prefer render_page_to_jpeg_buffer for network delivery.  This function
+ * exists for use-cases where lossless pixel-perfect output is required
+ * (e.g. archival, diffing, thumbnail generation for cover pages).
  *
- * @param ctx The compression context to finalize.
+ * @param page      Poppler page to render; must not be NULL.
+ * @param width     Page width in PDF points.
+ * @param height    Page height in PDF points.
+ * @param out_buffer Output buffer populated on success.  Caller must free
+ *                   out_buffer->data with free().
  * @return true on success, false on failure.
+ * @note Thread-safe: acquires the global Cairo mutex internally.
  */
-static bool finalize_gzip_compression(cairo_gzip_write_context_t* ctx) {
-    if (!ctx->initialized || ctx->error_occurred) { return false; }
+bool render_page_to_png_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
+    if (page == NULL || out_buffer == NULL) { return false; }
 
-    // Finish compression (flush all remaining data)
-    ctx->stream.avail_in = 0;
-    int ret;
-    do {
-        // Ensure we have output space
-        if (ctx->size >= ctx->capacity) {
-            size_t new_capacity = ctx->capacity * 2;
-            unsigned char* new_data = realloc(ctx->data, new_capacity);
-            if (new_data == NULL) { return false; }
-            ctx->data = new_data;
-            ctx->capacity = new_capacity;
-        }
+    int pixel_width = (int)(width * SCREEN_RESOLUTION / 72.0);
+    int pixel_height = (int)(height * SCREEN_RESOLUTION / 72.0);
 
-        ctx->stream.next_out = ctx->data + ctx->size;
-        ctx->stream.avail_out = (uInt)(ctx->capacity - ctx->size);
+    cairo_surface_t* surface = render_page_to_surface(page, pixel_width, pixel_height, (double)width, (double)height);
+    if (surface == NULL) { return false; }
 
-        ret = deflate(&ctx->stream, Z_FINISH);
-        ctx->size = ctx->capacity - ctx->stream.avail_out;
+    cairo_membuf_t buf = {.data = NULL, .size = 0, .capacity = 0};
 
-        if (ret != Z_STREAM_END && ret != Z_OK) {
-            fprintf(stderr, "Error: Compression failed during finalization: %d\n", ret);
-            return false;
-        }
-    } while (ret != Z_STREAM_END);
-
-    deflateEnd(&ctx->stream);
-    return true;
-}
-
-bool render_page_to_compressed_buffer(PopplerPage* page, int width, int height, pdf_buffer_t* out_buffer) {
-    // Calculate pixel dimensions at the target resolution
-    int pixel_width = (int)(width * DEFAULT_RESOLUTION / 72.0);
-    int pixel_height = (int)(height * DEFAULT_RESOLUTION / 72.0);
-
-    LOCK_CAIRO_MUTEX();
-
-    // Create the Cairo image surface
-    cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pixel_width, pixel_height);
-    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create Cairo surface\n");
-        UNLOCK_CAIRO_MUTEX();
-        return false;
-    }
-
-    cairo_t* cr = cairo_create(surface);
-    if (cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create Cairo context\n");
-        cairo_surface_destroy(surface);
-        UNLOCK_CAIRO_MUTEX();
-        return false;
-    }
-
-    // Set white background
-    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-    cairo_paint(cr);
-
-    // Disable text antialiasing for sharper rendering
-    cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
-
-    // Scale to maintain aspect ratio
-    double scale_x = (double)pixel_width / width;
-    double scale_y = (double)pixel_height / height;
-    cairo_scale(cr, scale_x, scale_y);
-
-    // Render the PDF page
-    poppler_page_render(page, cr);
-
-    UNLOCK_CAIRO_MUTEX();
-
-    // Initialize gzip compression context
-    cairo_gzip_write_context_t write_ctx = {
-        .stream = {0},
-        .data = NULL,
-        .size = 0,
-        .capacity = 0,
-        .initialized = false,
-        .error_occurred = false,
-    };
-
-    // Write PNG to compressed buffer via streaming callback
-    cairo_status_t status = cairo_surface_write_to_png_stream(surface, cairo_write_to_gzip_buffer, &write_ctx);
-
-    cairo_destroy(cr);
+    /* cairo_surface_write_to_png_stream operates on already-rendered pixel
+     * data and does not touch Cairo drawing state, so no lock is needed. */
+    cairo_status_t status = cairo_surface_write_to_png_stream(surface, membuf_write, &buf);
     cairo_surface_destroy(surface);
 
     if (status != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Could not write PNG to buffer: %s\n", cairo_status_to_string(status));
-        if (write_ctx.initialized) { deflateEnd(&write_ctx.stream); }
-        free(write_ctx.data);
+        fprintf(stderr, "Error: cairo_surface_write_to_png_stream: %s\n", cairo_status_to_string(status));
+        membuf_free(&buf);
         return false;
     }
 
-    // Finalize compression (flush remaining data)
-    if (!finalize_gzip_compression(&write_ctx)) {
-        fprintf(stderr, "Error: Failed to finalize gzip compression\n");
-        free(write_ctx.data);
-        return false;
+    out_buffer->data = buf.data;
+    out_buffer->size = buf.size;
+    return true;
+}
+
+/**
+ * Renders a page from an open document to a PNG buffer.
+ *
+ * @param doc      Open Poppler document; must not be NULL.
+ * @param page_num Zero-based page index.
+ * @param out_buffer Output buffer populated on success.
+ * @return true on success, false on failure.
+ */
+bool render_page_from_document_to_png_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer) {
+    PopplerPage* page = poppler_document_get_page(doc, page_num);
+    if (page == NULL) { return false; }
+
+    double width, height;
+    poppler_page_get_size(page, &width, &height);
+    bool result = render_page_to_png_buffer(page, (int)width, (int)height, out_buffer);
+    g_object_unref(page);
+    return result;
+}
+
+/* ==========================================================================
+ * PNG file output — debugging / offline rendering
+ * ========================================================================== */
+
+/**
+ * Renders a Poppler page to a PNG file on disk.
+ *
+ * Intended for debugging and offline use.  For HTTP delivery use
+ * render_page_to_jpeg_buffer instead.
+ *
+ * @param page        Poppler page to render; must not be NULL.
+ * @param width       Page width in PDF points.
+ * @param height      Page height in PDF points.
+ * @param output_file Destination file path for the PNG.
+ */
+void render_page_to_image(PopplerPage* page, int width, int height, const char* output_file) {
+    if (page == NULL || output_file == NULL) { return; }
+
+    int pixel_width = (int)(width * SCREEN_RESOLUTION / 72.0);
+    int pixel_height = (int)(height * SCREEN_RESOLUTION / 72.0);
+
+    cairo_surface_t* surface = render_page_to_surface(page, pixel_width, pixel_height, (double)width, (double)height);
+    if (surface == NULL) { return; }
+
+    cairo_status_t status = cairo_surface_write_to_png(surface, output_file);
+    if (status != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Could not write PNG file '%s': %s\n", output_file, cairo_status_to_string(status));
     }
 
-    // Transfer ownership to caller
-    out_buffer->data = write_ctx.data;
-    out_buffer->size = write_ctx.size;
+    cairo_surface_destroy(surface);
+}
+
+/**
+ * Renders a page from an open document to a PNG file.
+ *
+ * @param doc        Open Poppler document; must not be NULL.
+ * @param page_num   Zero-based page index.
+ * @param output_png Destination file path.
+ * @return true on success, false if the page cannot be retrieved.
+ */
+bool render_page_from_document(PopplerDocument* doc, int page_num, const char* output_png) {
+    PopplerPage* page = poppler_document_get_page(doc, page_num);
+    if (page == NULL) { return false; }
+
+    double width, height;
+    poppler_page_get_size(page, &width, &height);
+    render_page_to_image(page, (int)width, (int)height, output_png);
+    g_object_unref(page);
     return true;
 }
 
 /* ==========================================================================
- * PDF Attributes and Vector PDF Buffer Rendering
+ * Vector PDF buffer rendering
  * ========================================================================== */
 
 /**
- * Helper to safely duplicate a Poppler string (which might be NULL)
- * into a standard C string that we manage.
+ * Renders a Poppler page to a PDF-encoded in-memory buffer using Cairo's PDF
+ * surface.  This preserves vector content rather than rasterising it, and
+ * produces the smallest possible output for text-heavy documents.
+ *
+ * @param page       Poppler page to render; must not be NULL.
+ * @param out_buffer Output buffer populated on success.  Caller must free
+ *                   out_buffer->data with free().
+ * @return true on success, false on failure.
+ * @note Thread-safe: acquires the global Cairo mutex internally.
  */
-static char* get_poppler_string_property(PopplerDocument* doc, const char* property) {
-    gchar* value = NULL;
-    g_object_get(G_OBJECT(doc), property, &value, NULL);
-    if (value) {
-        char* copy = strdup(value);
-        g_free(value);
-        return copy;
+bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer) {
+    if (page == NULL || out_buffer == NULL) { return false; }
+
+    double width, height;
+    poppler_page_get_size(page, &width, &height);
+
+    cairo_membuf_t buf = {.data = NULL, .size = 0, .capacity = 0};
+
+    LOCK_CAIRO();
+
+    cairo_surface_t* surface = cairo_pdf_surface_create_for_stream(membuf_write, &buf, width, height);
+    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Failed to create Cairo PDF surface\n");
+        cairo_surface_destroy(surface);
+        membuf_free(&buf);
+        UNLOCK_CAIRO();
+        return false;
     }
-    return NULL;
+
+    cairo_t* cr = cairo_create(surface);
+    if (cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Failed to create Cairo context\n");
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        membuf_free(&buf);
+        UNLOCK_CAIRO();
+        return false;
+    }
+
+    /* Render vector content; no raster scaling needed for PDF-to-PDF. */
+    poppler_page_render(page, cr);
+
+    /* cairo_surface_finish flushes all pending stream writes to membuf_write
+     * before we inspect the buffer; must be called while holding the lock. */
+    cairo_surface_finish(surface);
+    cairo_status_t status = cairo_surface_status(surface);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    UNLOCK_CAIRO();
+
+    if (status != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Cairo PDF surface finish failed: %s\n", cairo_status_to_string(status));
+        membuf_free(&buf);
+        return false;
+    }
+
+    out_buffer->data = buf.data;
+    out_buffer->size = buf.size;
+    return true;
 }
 
 /**
- * Converts a generic time_t to a newly allocated formatted string.
- * Returns NULL if time is 0.
+ * Renders a page from an open document to a PDF buffer.
+ *
+ * @param doc      Open Poppler document; must not be NULL.
+ * @param page_num Zero-based page index.
+ * @param out_buffer Output buffer populated on success.
+ * @return true on success, false on failure.
  */
-static char* format_time_property(time_t t) {
-    if (t == 0) return NULL;
+bool render_page_from_document_to_pdf_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer) {
+    PopplerPage* page = poppler_document_get_page(doc, page_num);
+    if (page == NULL) { return false; }
 
-    // Allocate enough space for standard time format
-    char* buf = malloc(64);
-    if (!buf) return NULL;
+    bool result = render_page_to_pdf_buffer(page, out_buffer);
+    g_object_unref(page);
+    return result;
+}
+
+/* ==========================================================================
+ * Single-page PDF file output
+ * ========================================================================== */
+
+/**
+ * Writes a single Poppler page to a PDF file on disk via Cairo.
+ *
+ * @param page       Poppler page to render; must not be NULL.
+ * @param output_pdf Destination file path for the PDF.
+ * @return true on success, false on failure.
+ */
+bool poppler_page_to_pdf(PopplerPage* page, const char* output_pdf) {
+    if (page == NULL || output_pdf == NULL) { return false; }
+
+    double width, height;
+    poppler_page_get_size(page, &width, &height);
+
+    LOCK_CAIRO();
+
+    cairo_surface_t* surface = cairo_pdf_surface_create(output_pdf, width, height);
+    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Failed to create Cairo PDF surface for '%s'\n", output_pdf);
+        cairo_surface_destroy(surface);
+        UNLOCK_CAIRO();
+        return false;
+    }
+
+    cairo_t* cr = cairo_create(surface);
+    if (cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Failed to create Cairo context\n");
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        UNLOCK_CAIRO();
+        return false;
+    }
+
+    poppler_page_render(page, cr);
+    cairo_surface_finish(surface);
+    cairo_status_t status = cairo_surface_status(surface);
+
+    cairo_destroy(cr);
+    cairo_surface_destroy(surface);
+
+    UNLOCK_CAIRO();
+
+    if (status != CAIRO_STATUS_SUCCESS) {
+        fprintf(stderr, "Error: Cairo PDF surface finish failed: %s\n", cairo_status_to_string(status));
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Renders a page from an open document to a PDF file.
+ *
+ * @param doc        Open Poppler document; must not be NULL.
+ * @param page_num   Zero-based page index.
+ * @param output_pdf Destination file path.
+ * @return true on success, false on failure.
+ */
+bool render_page_to_pdf(PopplerDocument* doc, int page_num, const char* output_pdf) {
+    PopplerPage* page = poppler_document_get_page(doc, page_num);
+    if (page == NULL) { return false; }
+
+    bool result = poppler_page_to_pdf(page, output_pdf);
+    g_object_unref(page);
+    return result;
+}
+
+/* ==========================================================================
+ * PDF metadata
+ * ========================================================================== */
+
+/** @private Formats a time_t as a "YYYY-MM-DD HH:MM:SS" string.
+ *  Returns NULL if @p t is 0 or allocation fails. */
+static char* format_time_property(time_t t) {
+    if (t == 0) { return NULL; }
+
+    char* buf = malloc(32);
+    if (buf == NULL) { return NULL; }
 
     struct tm* tm_info = localtime(&t);
-    strftime(buf, 64, "%Y-%m-%d %H:%M:%S", tm_info);
+    strftime(buf, 32, "%Y-%m-%d %H:%M:%S", tm_info);
     return buf;
 }
 
-void free_pdf_metadata(pdf_metadata_t* meta) {
-    if (meta == NULL) return;
-    if (meta->title) free(meta->title);
-    if (meta->author) free(meta->author);
-    if (meta->subject) free(meta->subject);
-    if (meta->keywords) free(meta->keywords);
-    if (meta->creator) free(meta->creator);
-    if (meta->producer) free(meta->producer);
-    if (meta->creation_date) free(meta->creation_date);
-    if (meta->mod_date) free(meta->mod_date);
-    if (meta->pdf_version) free(meta->pdf_version);
-    // Zero out the struct to prevent double frees
-    memset(meta, 0, sizeof(pdf_metadata_t));
-}
-
 void get_pdf_metadata(PopplerDocument* doc, int num_pages, pdf_metadata_t* out_meta) {
-    // Initialize structure
     memset(out_meta, 0, sizeof(pdf_metadata_t));
 
-    // Basic Integer/Boolean properties
     out_meta->page_count = num_pages;
-    const char* ver_str = poppler_document_get_pdf_version_string(doc);
-    out_meta->pdf_version = ver_str ? strdup(ver_str) : NULL;
     out_meta->is_encrypted = FALSE;
 
-    // String Properties
+    const char* ver = poppler_document_get_pdf_version_string(doc);
+    out_meta->pdf_version = ver != NULL ? strdup(ver) : NULL;
+
+    /* Poppler returns newly allocated strings for these; we own them. */
     out_meta->title = poppler_document_get_title(doc);
     out_meta->author = poppler_document_get_author(doc);
     out_meta->subject = poppler_document_get_subject(doc);
@@ -613,83 +714,20 @@ void get_pdf_metadata(PopplerDocument* doc, int num_pages, pdf_metadata_t* out_m
     out_meta->creator = poppler_document_get_creator(doc);
     out_meta->producer = poppler_document_get_producer(doc);
 
-    // Date Properties
-    // poppler_document_get_creation_date returns time_t directly in modern glib bindings
-    // or takes an argument. We use the property interface for maximum compatibility or specific getters.
-    time_t create_time = poppler_document_get_creation_date(doc);
-    time_t mod_time = poppler_document_get_modification_date(doc);
-
-    out_meta->creation_date = format_time_property(create_time);
-    out_meta->mod_date = format_time_property(mod_time);
+    out_meta->creation_date = format_time_property(poppler_document_get_creation_date(doc));
+    out_meta->mod_date = format_time_property(poppler_document_get_modification_date(doc));
 }
 
-bool render_page_to_pdf_buffer(PopplerPage* page, pdf_buffer_t* out_buffer) {
-    if (page == NULL || out_buffer == NULL) { return false; }
-
-    double width, height;
-    poppler_page_get_size(page, &width, &height);
-
-    // For PDF-to-PDF, we usually want 1:1 scale (72 DPI standard) to preserve physical size.
-    // We do NOT multiply by (DEFAULT_RESOLUTION / 72.0) here because PDF surfaces
-    // are vector-based and defined in points.
-
-    LOCK_CAIRO_MUTEX();
-
-    // Initialize write context
-    cairo_write_context_t write_ctx = {.data = NULL, .size = 0, .capacity = 0};
-
-    // Create PDF surface writing to stream (memory buffer)
-    // We reuse the existing 'cairo_write_to_buffer' callback.
-    cairo_surface_t* surface = cairo_pdf_surface_create_for_stream(cairo_write_to_buffer, &write_ctx, width, height);
-
-    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create Cairo PDF surface\n");
-        free(write_ctx.data);
-        UNLOCK_CAIRO_MUTEX();
-        return false;
-    }
-
-    cairo_t* cr = cairo_create(surface);
-    if (cairo_status(cr) != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create Cairo context\n");
-        cairo_surface_destroy(surface);
-        free(write_ctx.data);
-        UNLOCK_CAIRO_MUTEX();
-        return false;
-    }
-
-    // No need to set white background or scale for PDF-to-PDF usually;
-    // we want the exact vector content.
-    // Render the Poppler page into the Cairo PDF context
-    poppler_page_render(page, cr);
-
-    // Finish surface to ensure all stream data is flushed to the buffer
-    cairo_surface_finish(surface);
-
-    cairo_status_t status = cairo_surface_status(surface);
-
-    cairo_destroy(cr);
-    cairo_surface_destroy(surface);
-
-    UNLOCK_CAIRO_MUTEX();
-
-    if (status != CAIRO_STATUS_SUCCESS) {
-        fprintf(stderr, "Error: Cairo surface finish failed: %s\n", cairo_status_to_string(status));
-        free(write_ctx.data);
-        return false;
-    }
-
-    // Transfer ownership to caller
-    out_buffer->data = write_ctx.data;
-    out_buffer->size = write_ctx.size;
-    return true;
-}
-
-bool render_page_from_document_to_pdf_buffer(PopplerDocument* doc, int page_num, pdf_buffer_t* out_buffer) {
-    PopplerPage* page = poppler_document_get_page(doc, page_num);
-    if (!page) { return false; }
-
-    bool result = render_page_to_pdf_buffer(page, out_buffer);
-    g_object_unref(page);
-    return result;
+void free_pdf_metadata(pdf_metadata_t* meta) {
+    if (meta == NULL) { return; }
+    free(meta->title);
+    free(meta->author);
+    free(meta->subject);
+    free(meta->keywords);
+    free(meta->creator);
+    free(meta->producer);
+    free(meta->creation_date);
+    free(meta->mod_date);
+    free(meta->pdf_version);
+    memset(meta, 0, sizeof(pdf_metadata_t));
 }
