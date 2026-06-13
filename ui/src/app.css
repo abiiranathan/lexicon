@@ -229,7 +229,7 @@ body {
 
 @media (max-width: 768px) {
   .container {
-    padding: 1.5rem 1rem;
+    padding: 1.5rem 0.5rem;
   }
 
   .header {
@@ -239,7 +239,7 @@ body {
   }
 
   .content-section {
-    padding: 1.25rem;
+    padding: 0;
   }
 
   .files-controls {

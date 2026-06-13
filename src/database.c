@@ -106,7 +106,7 @@ void create_connection_pool(const char* conn_string) {
 
 // Destroys a connection pool and releases all resources.
 void close_connections(void) {
-    if (pool) pgpool_destroy(pool, 5000);
+    if (pool) pgpool_destroy(pool, 1000);
 }
 
 // Create all the table schema and partitions, RUM extension and associated INDEXES.

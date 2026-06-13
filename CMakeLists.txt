@@ -5,7 +5,8 @@ project(lexicon VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(WORKER_COUNT "4" CACHE STRING "Number of worker threads")
+set(WORKER_COUNT "4" CACHE STRING "Number of PDF indexer worker threads")
+set(SERVER_WORKERS "2" CACHE STRING "Number of server worker threads")
 
 find_package(PkgConfig REQUIRED)
 find_package(PostgreSQL REQUIRED)
@@ -51,8 +52,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${PostgreSQL_INCLUDE_DIRS}
 )
 
-
-target_compile_definitions(${PROJECT_NAME} PRIVATE _GNU_SOURCE WORKER_COUNT=${WORKER_COUNT})
+target_compile_definitions(${PROJECT_NAME} PRIVATE 
+    _GNU_SOURCE 
+    WORKER_COUNT=${WORKER_COUNT}
+    WORKERS=${SERVER_WORKERS}
+)
 
 # Enable LTO for Release builds
 if(CMAKE_BUILD_TYPE MATCHES "Release")

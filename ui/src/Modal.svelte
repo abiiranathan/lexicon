@@ -25,9 +25,17 @@
   let imageLoaded = $state(false);
   let loadedImage = $state<HTMLImageElement | null>(null);
 
-  // View mode: 'fit' for zoom/pan, 'scroll' for readable scrolling
-  let viewMode = $state<"fit" | "scroll">("scroll");
+  // View mode: default to 'fit' on small screens (< 760px) and 'scroll' on larger screens
+  let viewMode = $state<"fit" | "scroll">(
+    typeof window !== "undefined" && window.innerWidth < 760 ? "fit" : "scroll",
+  );
+
+  // Search state — reset whenever the active file changes.
   let searchQuery = $state("");
+  let searchResults = $state<{ results: SearchResult[] }>({ results: [] });
+  let isSearching = $state(false);
+  let searchError = $state<string | null>(null);
+  let searchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   let showMobileSearch = $state(false);
 
   // Pan and zoom state (only used in 'fit' mode)
@@ -40,9 +48,22 @@
   let dragStartY = $state(0);
   let rotation = $state(0); // 0, 90, 180, 270
 
-  let searchResults = $state<{ results: SearchResult[] }>({ results: [] });
-  let isSearching = $state(false);
-  let searchError = $state<string | null>(null);
+  // ---------------------------------------------------------------------------
+  // Reset search state when the viewed file changes so stale results
+  // from a previous document are never shown in the current one.
+  // ---------------------------------------------------------------------------
+  let lastFileId = $state<number | null>(null);
+
+  $effect(() => {
+    if (!modalContent) return;
+    if (modalContent.file_id !== lastFileId) {
+      lastFileId = modalContent.file_id;
+      searchQuery = "";
+      searchResults = { results: [] };
+      searchError = null;
+      isSearching = false;
+    }
+  });
 
   // Sync URL state with modal
   $effect(() => {
@@ -71,7 +92,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Canvas rendering (logic intact)
+  // Canvas rendering — logic preserved verbatim from original.
   // ---------------------------------------------------------------------------
 
   const isLandscapeRotation = $derived(rotation === 90 || rotation === 270);
@@ -234,7 +255,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Input handlers (logic intact)
+  // Input handlers — logic preserved verbatim from original.
   // ---------------------------------------------------------------------------
 
   function handleWheel(e: WheelEvent): void {
@@ -389,7 +410,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Page navigation
+  // Page navigation — logic preserved verbatim from original.
   // ---------------------------------------------------------------------------
 
   const viewPrevPage = (): void => {
@@ -446,10 +467,23 @@
   };
 
   // ---------------------------------------------------------------------------
-  // Search
+  // Search — FIXED:
+  //   1. handleSearchInput debounces auto-search (300 ms) so the user gets
+  //      live results without pressing Enter.
+  //   2. handleSearchSubmit fires immediately on Enter / button click.
+  //   3. highlightText converts <b>…</b> → <mark>…</mark> for all snippets.
+  //   4. Clearing the query clears results immediately.
   // ---------------------------------------------------------------------------
 
-  async function handleSearch(query: string): Promise<void> {
+  function highlightText(text: string): string {
+    return text
+      .replace(/<b>/g, "<mark>")
+      .replace(/<\/b>/g, "</mark>")
+      .replace(/\n/g, "<br/>")
+      .replace(/<\/mark>\s*<mark>/g, " ");
+  }
+
+  async function runSearch(query: string): Promise<void> {
     if (!query || !modalContent || query.length < 2) {
       searchResults = { results: [] };
       searchError = null;
@@ -463,9 +497,37 @@
       searchResults = await searchAPI(query, { fileId: modalContent.file_id });
     } catch (error: unknown) {
       searchError = (error as Error).message;
+      searchResults = { results: [] };
     } finally {
       isSearching = false;
     }
+  }
+
+  function handleSearchInput(e: Event): void {
+    const value = (e.currentTarget as HTMLInputElement).value;
+    searchQuery = value;
+
+    clearTimeout(searchDebounceTimer);
+
+    if (!value || value.length < 2) {
+      searchResults = { results: [] };
+      searchError = null;
+      return;
+    }
+
+    searchDebounceTimer = setTimeout(() => runSearch(value), 300);
+  }
+
+  function handleSearchSubmit(): void {
+    clearTimeout(searchDebounceTimer);
+    runSearch(searchQuery);
+  }
+
+  function clearSearch(): void {
+    clearTimeout(searchDebounceTimer);
+    searchQuery = "";
+    searchResults = { results: [] };
+    searchError = null;
   }
 
   const handleResultClick = (result: SearchResult): void => {
@@ -475,18 +537,14 @@
       result.num_pages,
       result.file_name,
     );
-    searchResults = { results: [] };
-    searchQuery = "";
+    clearSearch();
     showMobileSearch = false;
   };
 
-  function highlightText(text: string): string {
-    return text
-      .replace(/<b>/g, "<mark>")
-      .replace(/<\/b>/g, "</mark>")
-      .replace(/\n/g, "<br/>")
-      .replace(/<\/mark>\s*<mark>/g, " ");
-  }
+  const dropdownVisible = $derived(
+    searchQuery.length > 0 &&
+      (isSearching || !!searchError || searchResults.results.length > 0),
+  );
 </script>
 
 {#if isOpen && modalContent}
@@ -502,47 +560,54 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="modal-content" onclick={(e: Event) => e.stopPropagation()}>
-      <!-- Top header bar: persistent on desktop, slimmed on mobile -->
+      <!-- ── Header ── -->
       <div class="modal-header">
+        <!-- Left: close (mobile) + title -->
         <div class="header-left">
           <button
-            class="modal-close-btn mobile-only"
+            class="icon-btn mobile-only"
             onclick={onClose}
             aria-label="Close"
+            type="button"
           >
             <svg
-              width="24"
-              height="24"
+              width="20"
+              height="20"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
               stroke-width="2"
             >
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
+              <line x1="18" y1="6" x2="6" y2="18" /><line
+                x1="6"
+                y1="6"
+                x2="18"
+                y2="18"
+              />
             </svg>
           </button>
-          <h3 id="modal-title">{modalContent.title}</h3>
+          <h3 id="modal-title" class="modal-title">{modalContent.title}</h3>
         </div>
 
-        <!-- Desktop Controls Block -->
-        <div class="desktop-controls-wrapper desktop-only">
-          {#if modalContent.file_id && modalContent.filename && modalContent.page && modalContent.num_pages && modalContent.num_pages > 1}
-            <div class="page-navigation">
+        <!-- Centre: page nav + view controls (desktop) -->
+        <div class="desktop-controls desktop-only">
+          {#if modalContent.file_id && modalContent.filename && modalContent.num_pages > 1}
+            <div class="control-group">
               <button
-                class="nav-button"
+                class="icon-btn"
                 onclick={viewPrevPage}
                 disabled={modalContent.page === 1}
                 aria-label="Previous page"
                 title="Previous (←)"
+                type="button"
               >
                 <svg
-                  width="18"
-                  height="18"
+                  width="16"
+                  height="16"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
-                  stroke-width="2"
+                  stroke-width="2.5"
                 >
                   <polyline points="15 18 9 12 15 6"></polyline>
                 </svg>
@@ -565,7 +630,7 @@
                     max={modalContent.num_pages}
                     aria-label="Jump to page"
                   />
-                  <span class="page-max">/ {modalContent.num_pages}</span>
+                  <span class="page-sep">/ {modalContent.num_pages}</span>
                 </form>
               {:else}
                 <button
@@ -573,25 +638,27 @@
                   onclick={togglePageInput}
                   title="Jump to page (g)"
                   aria-label="Jump to page"
+                  type="button"
                 >
                   {modalContent.page} / {modalContent.num_pages}
                 </button>
               {/if}
 
               <button
-                class="nav-button"
+                class="icon-btn"
                 onclick={viewNextPage}
                 disabled={modalContent.page === modalContent.num_pages}
                 aria-label="Next page"
                 title="Next (→)"
+                type="button"
               >
                 <svg
-                  width="18"
-                  height="18"
+                  width="16"
+                  height="16"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
-                  stroke-width="2"
+                  stroke-width="2.5"
                 >
                   <polyline points="9 18 15 12 9 6"></polyline>
                 </svg>
@@ -600,15 +667,17 @@
           {/if}
 
           {#if imageLoaded}
+            <!-- Rotate -->
             <button
-              class="nav-button"
+              class="icon-btn"
               onclick={rotateImage}
-              aria-label="Rotate image 90 degrees"
+              aria-label="Rotate 90°"
               title="Rotate (Shift+R)"
+              type="button"
             >
               <svg
-                width="18"
-                height="18"
+                width="16"
+                height="16"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -619,8 +688,11 @@
                 <path d="M21 3v5h-5"></path>
               </svg>
             </button>
+
+            <!-- View mode toggle -->
             <button
-              class="nav-button"
+              class="icon-btn"
+              class:icon-btn--active={viewMode === "fit"}
               onclick={toggleViewMode}
               aria-label={viewMode === "scroll"
                 ? "Switch to zoom mode"
@@ -628,11 +700,12 @@
               title={viewMode === "scroll"
                 ? "Zoom mode (v)"
                 : "Scroll mode (v)"}
+              type="button"
             >
               {#if viewMode === "scroll"}
                 <svg
-                  width="18"
-                  height="18"
+                  width="16"
+                  height="16"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -645,8 +718,8 @@
                 </svg>
               {:else}
                 <svg
-                  width="18"
-                  height="18"
+                  width="16"
+                  height="16"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -660,17 +733,19 @@
               {/if}
             </button>
 
+            <!-- Zoom controls (fit mode only) -->
             {#if viewMode === "fit"}
-              <div class="zoom-controls">
+              <div class="control-group">
                 <button
-                  class="nav-button"
+                  class="icon-btn"
                   onclick={() => (scale = Math.max(0.5, scale - 0.2))}
                   aria-label="Zoom out"
                   title="Zoom out (-)"
+                  type="button"
                 >
                   <svg
-                    width="18"
-                    height="18"
+                    width="16"
+                    height="16"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -681,20 +756,17 @@
                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                   </svg>
                 </button>
-
-                <span class="zoom-level">
-                  {Math.round(scale * 100)}%
-                </span>
-
+                <span class="zoom-label">{Math.round(scale * 100)}%</span>
                 <button
-                  class="nav-button"
+                  class="icon-btn"
                   onclick={() => (scale = Math.min(5, scale + 0.2))}
                   aria-label="Zoom in"
                   title="Zoom in (+)"
+                  type="button"
                 >
                   <svg
-                    width="18"
-                    height="18"
+                    width="16"
+                    height="16"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
@@ -711,56 +783,129 @@
           {/if}
         </div>
 
+        <!-- Right: search + close -->
         <div class="header-right">
+          <!-- In-document search widget -->
           <div class="search-wrapper" class:mobile-active={showMobileSearch}>
-            <input
-              type="text"
-              class="search_book"
-              placeholder="Search in file..."
-              bind:value={searchQuery}
-              onkeydown={(e: KeyboardEvent) => {
-                if (e.key === "Enter") {
-                  handleSearch(searchQuery);
-                }
-              }}
-            />
+            <div class="search-field-wrap">
+              <svg
+                class="search-field-icon"
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                aria-hidden="true"
+              >
+                <circle cx="11" cy="11" r="8"></circle>
+                <path d="m21 21-4.35-4.35"></path>
+              </svg>
+              <input
+                type="text"
+                class="search-field"
+                placeholder="Search in document…"
+                value={searchQuery}
+                oninput={handleSearchInput}
+                onkeydown={(e: KeyboardEvent) => {
+                  if (e.key === "Enter") handleSearchSubmit();
+                  if (e.key === "Escape") clearSearch();
+                }}
+                aria-label="Search inside document"
+                spellcheck="false"
+                autocomplete="off"
+              />
+              {#if searchQuery}
+                <button
+                  class="search-clear"
+                  onclick={clearSearch}
+                  type="button"
+                  aria-label="Clear search"
+                >
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.5"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18" /><line
+                      x1="6"
+                      y1="6"
+                      x2="18"
+                      y2="18"
+                    />
+                  </svg>
+                </button>
+              {/if}
+            </div>
+
             {#if showMobileSearch}
               <button
-                class="mobile-search-close"
+                class="mobile-search-cancel"
                 onclick={() => {
                   showMobileSearch = false;
-                  searchQuery = "";
+                  clearSearch();
                 }}
+                type="button"
               >
                 Cancel
               </button>
             {/if}
 
-            <!-- Search dropdown results -->
-            {#if searchQuery.length > 0 && (isSearching || searchError || searchResults.results.length > 0)}
-              <div class="search-results-dropdown">
+            <!-- Results dropdown -->
+            {#if dropdownVisible}
+              <div
+                class="search-dropdown"
+                role="listbox"
+                aria-label="Search results"
+              >
                 {#if isSearching}
-                  <div class="result-message">Searching inside document...</div>
+                  <div class="dropdown-status">
+                    <div class="dropdown-spinner"></div>
+                    Searching…
+                  </div>
                 {:else if searchError}
-                  <div class="result-message error-message-dropdown">
-                    Error: {searchError}
+                  <div class="dropdown-status dropdown-status--error">
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      aria-hidden="true"
+                    >
+                      <circle cx="12" cy="12" r="10" /><line
+                        x1="12"
+                        y1="8"
+                        x2="12"
+                        y2="12"
+                      />
+                    </svg>
+                    {searchError}
                   </div>
                 {:else if searchResults.results.length === 0}
-                  <div class="result-message">No results found</div>
+                  <div class="dropdown-status">No results found</div>
                 {:else}
-                  <ul class="results-list">
-                    {#each searchResults.results as result}
+                  <div class="dropdown-header">
+                    {searchResults.results.length}
+                    {searchResults.results.length === 1 ? "result" : "results"}
+                  </div>
+                  <ul class="dropdown-list">
+                    {#each searchResults.results as result (result.file_id + "-" + result.page_num)}
                       <!-- svelte-ignore a11y_click_events_have_key_events -->
                       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
                       <li
-                        class="search-result-item"
+                        class="dropdown-item"
                         onclick={() => handleResultClick(result)}
+                        role="option"
+                        aria-selected="false"
                       >
-                        <div class="result-header-row">
-                          <span class="result-page">Page {result.page_num}</span
-                          >
-                        </div>
-                        <p class="result-snippet">
+                        <span class="dropdown-page">Page {result.page_num}</span
+                        >
+                        <p class="dropdown-snippet">
                           {@html highlightText(result.snippet)}
                         </p>
                       </li>
@@ -771,14 +916,16 @@
             {/if}
           </div>
 
+          <!-- Mobile: search trigger -->
           <button
-            class="mobile-search-trigger mobile-only"
+            class="icon-btn mobile-only"
             onclick={() => (showMobileSearch = true)}
             aria-label="Search inside document"
+            type="button"
           >
             <svg
-              width="20"
-              height="20"
+              width="18"
+              height="18"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -789,31 +936,53 @@
             </svg>
           </button>
 
+          <!-- Close (desktop) -->
           <button
-            class="modal-close-btn desktop-only"
+            class="icon-btn icon-btn--close desktop-only"
             onclick={onClose}
-            aria-label="Close Dialog"
+            aria-label="Close dialog"
             title="Close (Esc)"
+            type="button"
           >
             <svg
-              width="24"
-              height="24"
+              width="18"
+              height="18"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
               stroke-width="2"
             >
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
+              <line x1="18" y1="6" x2="6" y2="18" /><line
+                x1="6"
+                y1="6"
+                x2="18"
+                y2="18"
+              />
             </svg>
           </button>
         </div>
       </div>
 
-      <!-- Main viewport for canvas -->
+      <!-- ── Canvas viewport ── -->
       <div class="modal-body" class:scroll-mode={viewMode === "scroll"}>
         {#if modalContent.error}
-          <div class="error-message">
+          <div class="render-error">
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="10" /><line
+                x1="12"
+                y1="8"
+                x2="12"
+                y2="12"
+              /><line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
             Failed to render: {modalContent.error}
           </div>
         {:else if modalContent.imageBlob}
@@ -838,26 +1007,31 @@
               class:fit-mode={viewMode === "fit"}
             ></canvas>
             {#if !imageLoaded}
-              <div class="loading-indicator">
-                <div class="spinner"></div>
+              <div class="canvas-loading">
+                <div class="canvas-spinner"></div>
               </div>
             {/if}
           </div>
         {/if}
       </div>
 
-      <!-- Mobile Floating Navigation / HUD Bar -->
+      <!-- ── Mobile HUD ── -->
       {#if imageLoaded && modalContent.num_pages > 1}
-        <div class="mobile-hud mobile-only">
+        <div
+          class="mobile-hud mobile-only"
+          role="toolbar"
+          aria-label="Page navigation"
+        >
           <button
             class="hud-btn"
             onclick={viewPrevPage}
             disabled={modalContent.page === 1}
             aria-label="Previous page"
+            type="button"
           >
             <svg
-              width="20"
-              height="20"
+              width="18"
+              height="18"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -883,10 +1057,11 @@
                   placeholder={modalContent.page.toString()}
                   min="1"
                   max={modalContent.num_pages}
+                  aria-label="Go to page"
                 />
               </form>
             {:else}
-              <button class="hud-page-indicator" onclick={togglePageInput}>
+              <button class="hud-page" onclick={togglePageInput} type="button">
                 {modalContent.page} / {modalContent.num_pages}
               </button>
             {/if}
@@ -894,13 +1069,14 @@
 
           <div class="hud-actions">
             <button
-              class="hud-action-btn"
+              class="hud-action"
               onclick={rotateImage}
-              aria-label="Rotate view"
+              aria-label="Rotate"
+              type="button"
             >
               <svg
-                width="18"
-                height="18"
+                width="16"
+                height="16"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
@@ -912,14 +1088,15 @@
               </svg>
             </button>
             <button
-              class="hud-action-btn"
+              class="hud-action"
               onclick={toggleViewMode}
-              aria-label="View mode toggle"
+              aria-label="Toggle view mode"
+              type="button"
             >
               {#if viewMode === "scroll"}
                 <svg
-                  width="18"
-                  height="18"
+                  width="16"
+                  height="16"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -932,8 +1109,8 @@
                 </svg>
               {:else}
                 <svg
-                  width="18"
-                  height="18"
+                  width="16"
+                  height="16"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -953,10 +1130,11 @@
             onclick={viewNextPage}
             disabled={modalContent.page === modalContent.num_pages}
             aria-label="Next page"
+            type="button"
           >
             <svg
-              width="20"
-              height="20"
+              width="18"
+              height="18"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -972,86 +1150,95 @@
 {/if}
 
 <style>
+  /* ── Overlay ── */
   .modal {
     position: fixed;
     inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(3, 7, 18, 0.9);
-    backdrop-filter: blur(8px);
+    background: rgba(3, 7, 18, 0.88);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
     z-index: 9999;
-    padding: 1.5rem;
+    padding: 1rem;
   }
 
+  /* ── Panel ── */
   .modal-content {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 1rem;
+    border-radius: 1.125rem;
     max-width: 1400px;
     width: 100%;
     height: 100%;
     display: flex;
     flex-direction: column;
     color: var(--text-primary);
-    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8);
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.04) inset,
+      0 32px 64px -16px rgba(0, 0, 0, 0.9);
     position: relative;
     overflow: hidden;
   }
 
+  /* ── Header ── */
   .modal-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 1rem 1.5rem;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-    gap: 1.5rem;
-    background: rgba(17, 24, 39, 0.6);
+    gap: 0.75rem;
+    background: rgba(11, 15, 25, 0.6);
+    min-height: 56px;
   }
 
   .header-left {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.625rem;
     min-width: 0;
     flex: 1;
   }
 
-  .header-left h3 {
+  .modal-title {
     margin: 0;
-    font-size: 1rem;
+    font-size: 0.875rem;
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--text-secondary);
   }
 
   .header-right {
     display: flex;
     align-items: center;
-    gap: 1rem;
+    gap: 0.5rem;
+    flex-shrink: 0;
   }
 
-  .desktop-controls-wrapper {
+  /* ── Desktop controls ── */
+  .desktop-controls {
     display: flex;
     align-items: center;
-    gap: 2rem;
+    gap: 0.375rem;
   }
 
-  /* Shared HUD/Nav element layouts */
-  .page-navigation,
-  .zoom-controls {
+  .control-group {
     display: flex;
     align-items: center;
     gap: 0.25rem;
-    padding: 0.25rem;
-    background: rgba(0, 0, 0, 0.2);
-    border-radius: 0.5rem;
+    background: rgba(0, 0, 0, 0.25);
     border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 0.25rem;
   }
 
-  .nav-button {
+  /* ── Icon buttons ── */
+  .icon-btn {
     background: transparent;
     border: none;
     color: var(--text-secondary);
@@ -1061,45 +1248,57 @@
     align-items: center;
     justify-content: center;
     border-radius: 0.375rem;
-    transition: all 0.15s;
+    transition:
+      background 0.12s,
+      color 0.12s;
+    line-height: 1;
   }
 
-  .nav-button:hover:not(:disabled) {
+  .icon-btn:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.08);
     color: var(--text-primary);
   }
 
-  .nav-button:disabled {
+  .icon-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
   }
 
-  .page-indicator,
-  .zoom-level {
-    font-size: 0.8125rem;
-    color: var(--text-primary);
-    padding: 0.25rem 0.5rem;
-    font-weight: 500;
-    min-width: 3.5rem;
-    text-align: center;
-    font-variant-numeric: tabular-nums;
+  .icon-btn--active {
+    color: #818cf8;
+    background: rgba(129, 140, 248, 0.1);
   }
 
+  .icon-btn--close:hover {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--error);
+  }
+
+  /* ── Page indicator ── */
   .page-indicator {
     background: transparent;
     border: none;
+    color: var(--text-primary);
     cursor: pointer;
-    border-radius: 0.375rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+    min-width: 4rem;
+    text-align: center;
+    transition: background 0.12s;
   }
 
   .page-indicator:hover {
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.06);
   }
 
   .page-jump-form {
     display: flex;
     align-items: center;
     gap: 0.25rem;
+    padding: 0 0.25rem;
   }
 
   .page-jump-input {
@@ -1107,111 +1306,182 @@
     padding: 0.125rem 0.25rem;
     font-size: 0.8125rem;
     background: var(--background);
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-focus);
     border-radius: 0.25rem;
     color: var(--text-primary);
     text-align: center;
+    font-variant-numeric: tabular-nums;
   }
 
   .page-jump-input:focus {
     outline: none;
-    border-color: var(--primary);
-  }
-
-  .page-max {
-    font-size: 0.8125rem;
-    color: var(--text-secondary);
-  }
-
-  .modal-close-btn {
-    background: transparent;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: 0.375rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 0.5rem;
-    transition: all 0.15s;
-    border: 1px solid transparent;
-  }
-
-  .modal-close-btn:hover {
-    color: var(--text-primary);
-    background: rgba(255, 255, 255, 0.05);
-    border-color: var(--border);
-  }
-
-  /* Inline Document Search styling */
-  .search-wrapper {
-    position: relative;
-    width: 220px;
-  }
-
-  .search_book {
-    width: 100%;
-    outline: none;
-    padding: 0.45rem 1rem;
-    border-radius: 0.5rem;
-    border: 1px solid var(--border);
-    background: rgba(0, 0, 0, 0.25);
-    color: var(--text-primary);
-    font-size: 0.875rem;
-    transition: all 0.15s;
-  }
-
-  .search_book:focus {
-    border-color: var(--primary);
-    background: rgba(0, 0, 0, 0.4);
     box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.25);
   }
 
-  .search-results-dropdown {
+  .page-sep {
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+
+  .zoom-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    min-width: 2.5rem;
+    text-align: center;
+  }
+
+  /* ── Search widget ── */
+  .search-wrapper {
+    position: relative;
+  }
+
+  .search-field-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .search-field-icon {
+    position: absolute;
+    left: 0.625rem;
+    color: var(--text-muted);
+    pointer-events: none;
+  }
+
+  .search-field {
+    width: 200px;
+    padding: 0.4375rem 2rem 0.4375rem 2rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    color: var(--text-primary);
+    font-size: 0.8125rem;
+    transition:
+      border-color 0.15s,
+      box-shadow 0.15s,
+      width 0.2s;
+  }
+
+  .search-field::placeholder {
+    color: var(--text-muted);
+  }
+
+  .search-field:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
+    width: 240px;
+  }
+
+  .search-clear {
+    position: absolute;
+    right: 0.5rem;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    padding: 0.25rem;
+    border-radius: 0.25rem;
+    transition: color 0.12s;
+  }
+
+  .search-clear:hover {
+    color: var(--text-secondary);
+  }
+
+  /* ── Search dropdown ── */
+  .search-dropdown {
     position: absolute;
     top: calc(100% + 0.5rem);
     right: 0;
-    width: 300px;
-    z-index: 1000;
-    background: #1f2937;
+    width: 320px;
+    background: #1a2232;
     border: 1px solid var(--border);
     border-radius: 0.75rem;
-    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
-    max-height: 350px;
+    box-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.7);
+    max-height: 380px;
     overflow-y: auto;
+    z-index: 1000;
   }
 
-  .results-list {
+  .dropdown-header {
+    padding: 0.625rem 1rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .dropdown-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1.25rem 1rem;
+    font-size: 0.8125rem;
+    color: var(--text-muted);
+  }
+
+  .dropdown-status--error {
+    color: var(--error);
+  }
+
+  .dropdown-spinner {
+    width: 0.875rem;
+    height: 0.875rem;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .dropdown-list {
     list-style: none;
-    padding: 0;
     margin: 0;
+    padding: 0.25rem 0;
   }
 
-  .search-result-item {
-    padding: 0.75rem 1rem;
+  .dropdown-item {
+    padding: 0.625rem 1rem;
     cursor: pointer;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    transition: background 0.15s;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    transition: background 0.12s;
   }
 
-  .search-result-item:hover {
+  .dropdown-item:last-child {
+    border-bottom: none;
+  }
+
+  .dropdown-item:hover {
     background: rgba(255, 255, 255, 0.04);
   }
 
-  .result-header-row {
+  .dropdown-page {
+    display: block;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #818cf8;
     margin-bottom: 0.25rem;
   }
 
-  .result-page {
-    font-size: 0.75rem;
-    color: #818cf8;
-    font-weight: 600;
-  }
-
-  .result-snippet {
+  .dropdown-snippet {
+    font-size: 0.8125rem;
     color: var(--text-secondary);
+    line-height: 1.5;
     margin: 0;
-    line-height: 1.4;
     display: -webkit-box;
     -webkit-line-clamp: 3;
     line-clamp: 3;
@@ -1219,30 +1489,23 @@
     overflow: hidden;
   }
 
-  .result-snippet :global(mark) {
-    background: rgba(245, 158, 11, 0.3);
+  .dropdown-snippet :global(mark) {
+    background: rgba(245, 158, 11, 0.2);
     color: #f59e0b;
     border-radius: 2px;
     padding: 0 1px;
+    font-weight: 500;
   }
 
-  .result-message {
-    padding: 1rem;
-    text-align: center;
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-  }
-
-  /* Viewport canvas workspace wrapper */
+  /* ── Canvas body ── */
   .modal-body {
     flex: 1;
     overflow: hidden;
-    padding: 0;
     min-height: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #0f1319;
+    background: #0c1018;
   }
 
   .modal-body.scroll-mode {
@@ -1266,12 +1529,11 @@
     overflow-x: auto;
     overflow-y: visible;
     touch-action: auto;
-    padding: 2rem 0;
   }
 
   .page-canvas {
     display: block;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7);
   }
 
   .page-canvas.fit-mode {
@@ -1282,44 +1544,160 @@
   .page-canvas.fit-mode.dragging {
     cursor: grabbing;
   }
-
   .page-canvas.fit-mode:not(.dragging) {
     cursor: grab;
   }
 
-  .loading-indicator {
+  .canvas-loading {
     position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background: rgba(0, 0, 0, 0.8);
-    padding: 1rem;
-    border-radius: 50%;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0c1018;
   }
 
-  .spinner {
-    width: 1.5rem;
-    height: 1.5rem;
-    border: 2px solid rgba(255, 255, 255, 0.2);
+  .canvas-spinner {
+    width: 1.75rem;
+    height: 1.75rem;
+    border: 2px solid rgba(255, 255, 255, 0.1);
     border-top-color: var(--primary);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
 
-  .error-message {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+  .render-error {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
     color: var(--error);
     padding: 1rem 1.5rem;
-    border-radius: 0.5rem;
+    border-radius: 0.625rem;
     font-size: 0.875rem;
+    max-width: 480px;
   }
 
-  /* Desktop and Mobile Responsiveness Controls styling */
-  .desktop-only {
+  /* ── Mobile HUD ── */
+  .mobile-hud {
+    position: absolute;
+    bottom: 1.25rem;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(17, 24, 39, 0.9);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 9999px;
+    padding: 0.375rem 0.625rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+    z-index: 100;
+  }
+
+  .hud-btn {
+    background: rgba(255, 255, 255, 0.07);
+    border: none;
+    color: var(--text-primary);
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+
+  .hud-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .hud-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.12);
+  }
+
+  .hud-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .hud-page {
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    cursor: pointer;
+    padding: 0.125rem 0.375rem;
+  }
+
+  .hud-form {
     display: flex;
   }
 
+  .hud-input {
+    width: 2.75rem;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    color: white;
+    text-align: center;
+    font-size: 0.8125rem;
+    padding: 0.125rem;
+  }
+
+  .hud-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    border-left: 1px solid rgba(255, 255, 255, 0.1);
+    border-right: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 0 0.5rem;
+  }
+
+  .hud-action {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    padding: 0.375rem;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    border-radius: 0.375rem;
+    transition:
+      color 0.12s,
+      background 0.12s;
+  }
+
+  .hud-action:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  /* ── Mobile search ── */
+  .mobile-search-cancel {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 0.25rem;
+    white-space: nowrap;
+  }
+
+  /* ── Responsive ── */
+  .desktop-only {
+    display: flex;
+  }
   .mobile-only {
     display: none !important;
   }
@@ -1328,7 +1706,6 @@
     .desktop-only {
       display: none !important;
     }
-
     .mobile-only {
       display: flex !important;
     }
@@ -1338,20 +1715,17 @@
     }
 
     .modal-content {
-      height: 100vh;
+      height: 100dvh;
       border-radius: 0;
       border: none;
     }
 
     .modal-header {
-      padding: 0.75rem 1rem;
-      gap: 0.5rem;
+      padding: 0.625rem 0.875rem;
     }
 
-    /* Expanding search bar on mobile */
     .search-wrapper {
       display: none;
-      width: 100%;
     }
 
     .search-wrapper.mobile-active {
@@ -1365,118 +1739,19 @@
       z-index: 10;
     }
 
-    .mobile-search-close {
-      background: transparent;
-      border: none;
-      color: var(--text-secondary);
-      font-size: 0.875rem;
-      font-weight: 500;
-      white-space: nowrap;
+    .search-wrapper.mobile-active .search-field {
+      width: 100%;
+      flex: 1;
     }
 
-    .search-results-dropdown {
+    .search-dropdown {
       top: 100%;
       left: 0;
       right: 0;
       width: 100%;
-      border-radius: 0 0 1rem 1rem;
+      border-radius: 0 0 0.75rem 0.75rem;
       border-top: none;
-      max-height: calc(100vh - 120px);
-    }
-
-    .mobile-search-trigger {
-      background: transparent;
-      border: none;
-      color: var(--text-secondary);
-      padding: 0.5rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    /* Floating bottom HUD pill design */
-    .mobile-hud {
-      position: absolute;
-      bottom: 1.5rem;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(31, 41, 55, 0.85);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--border);
-      border-radius: 9999px;
-      padding: 0.5rem 0.75rem;
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-      z-index: 100;
-    }
-
-    .hud-btn {
-      background: rgba(255, 255, 255, 0.08);
-      border: none;
-      color: var(--text-primary);
-      width: 2.25rem;
-      height: 2.25rem;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-    }
-
-    .hud-btn:disabled {
-      opacity: 0.3;
-    }
-
-    .hud-center {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .hud-page-indicator {
-      background: transparent;
-      border: none;
-      color: var(--text-primary);
-      font-size: 0.875rem;
-      font-weight: 600;
-      white-space: nowrap;
-    }
-
-    .hud-form {
-      display: flex;
-    }
-
-    .hud-input {
-      width: 3rem;
-      background: rgba(0, 0, 0, 0.3);
-      border: 1px solid var(--border);
-      border-radius: 0.25rem;
-      color: white;
-      text-align: center;
-      font-size: 0.875rem;
-      padding: 0.125rem;
-    }
-
-    .hud-actions {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      border-left: 1px solid var(--border);
-      border-right: 1px solid var(--border);
-      padding: 0 0.75rem;
-    }
-
-    .hud-action-btn {
-      background: transparent;
-      border: none;
-      color: var(--text-secondary);
-      padding: 0.25rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      max-height: calc(100dvh - 120px);
     }
   }
 </style>

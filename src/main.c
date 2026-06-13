@@ -81,24 +81,9 @@ void cors(PulsarCtx* ctx) {
     conn_writeheader_raw(ctx->conn, cors_headers, sizeof(cors_headers) - 1);
 }
 
-void init_app() {
-    // Initialize a fast in-memory cache with 1024 default entries.
-    // Default TTL is 2 hours
-    if (!init_response_cache(128, 2 * 60)) {
-        LOG_ERROR("failed to initialize in-memory cache");
-        exit(EXIT_FAILURE);
-    }
-}
-
-void cleanup() {
-    close_connections();
-    destroy_response_cache();
-}
-
 int main(int argc, char* argv[]) {
     load_dotenv(".env");
-    init_app();
-    defer_call(cleanup);
+    defer_call(close_connections);
 
     ensure_valid_pgconn_string();
     root = flag_parser_new("lexicon", "Fast PDF indexer and server");

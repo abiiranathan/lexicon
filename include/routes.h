@@ -11,21 +11,6 @@ extern "C" {
 #endif
 
 /**
- * Initializes the global response cache.
- * Call this once at application startup.
- * @param capacity Maximum cache entries (0 for default 1000).
- * @param ttl_seconds Time-to-live in seconds (0 for default 300).
- * @return true on success, false on failure.
- */
-bool init_response_cache(size_t capacity, uint32_t ttl_seconds);
-
-/**
- * Destroys the global response cache.
- * Call this at application shutdown.
- */
-void destroy_response_cache(void);
-
-/**
  * Returns full text for a given file_id and page_num.
  * Path: /api/file/{file_id}/page/{page_num}
  */

@@ -119,6 +119,9 @@ PopplerDocument* open_document(const char* filename, int* num_pages) {
         return NULL;
     }
 
+    PopplerDocument* doc = NULL;
+    GBytes* bytes = NULL;
+
     GFile* file = g_file_new_for_path(filename);
     if (file == NULL) {
         fprintf(stderr, "Error: Could not create GFile for path: %s\n", filename);
@@ -126,72 +129,66 @@ PopplerDocument* open_document(const char* filename, int* num_pages) {
     }
 
     GError* error = NULL;
-    GBytes* bytes = g_file_load_bytes(file, NULL, NULL, &error);
+    bytes = g_file_load_bytes(file, NULL, NULL, &error);
     g_object_unref(file);
 
     if (error != NULL) {
         fprintf(stderr, "Error loading file: %s\n", error->message);
         g_clear_error(&error);
-        return NULL;
+        goto out_unref_bytes;
     }
 
-    PopplerDocument* doc = poppler_document_new_from_bytes(bytes, NULL, &error);
-    g_bytes_unref(bytes);
-
+    doc = poppler_document_new_from_bytes(bytes, NULL, &error);
     if (error != NULL) {
         fprintf(stderr, "Error creating Poppler document: %s\n", error->message);
         g_clear_error(&error);
-        return NULL;
+        goto out_unref_bytes;
     }
 
     *num_pages = poppler_document_get_n_pages(doc);
+
+out_unref_bytes:
+    g_bytes_unref(bytes);
     return doc;
 }
 
 PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pages) {
+    PopplerDocument* doc = NULL;
+    GBytes* bytes = NULL;
+    char* buffer = NULL;
+
     vfs_fd_t fd = vfs_fopen(vfs, vfs_path, VFS_O_RDONLY);
     if (fd < 0) {
         fprintf(stderr, "Error opening VFS path %s: %s\n", vfs_path, vfs_strerror((vfs_status_t)fd));
         return NULL;
     }
-    defer {
-        vfs_fclose(vfs, fd);
-    };
 
     vfs_stat_t st;
     vfs_status_t status = vfs_stat(vfs, vfs_path, &st);
     if (status != VFS_OK) {
         fprintf(stderr, "Error getting stats for VFS path %s: %s\n", vfs_path, vfs_strerror(status));
-        return NULL;
+        goto out_close;
     }
 
-    /* g_try_malloc so GBytes can take ownership without an extra copy. */
-    char* buffer = g_try_malloc(st.size);
+    buffer = g_try_malloc(st.size);
     if (buffer == NULL) {
         fprintf(stderr, "Error: Failed to allocate %lu bytes for VFS read\n", (unsigned long)st.size);
-        return NULL;
+        goto out_close;
     }
-
-    bool ownership_transferred = false;
-    defer {
-        if (!ownership_transferred) { g_free(buffer); }
-    };
 
     size_t bytes_read = 0;
     status = vfs_fread(vfs, fd, buffer, st.size, &bytes_read);
     if (status != VFS_OK) {
         fprintf(stderr, "vfs_fread failed for %s: %s\n", vfs_path, vfs_strerror(status));
-        return NULL;
+        goto out_free_buffer;
     }
 
-    GBytes* bytes = g_bytes_new_take(buffer, st.size);
-    ownership_transferred = true;
-    defer {
-        g_bytes_unref(bytes);
-    };
+    /* g_bytes_new_take takes ownership of buffer; must not free it on success. */
+    bytes = g_bytes_new_take(buffer, st.size);
+    buffer = NULL;
 
     GError* error = NULL;
-    PopplerDocument* doc = poppler_document_new_from_bytes(bytes, NULL, &error);
+    doc = poppler_document_new_from_bytes(bytes, NULL, &error);
     if (doc == NULL) {
         if (error != NULL) {
             fprintf(stderr, "Error opening doc from bytes: %s\n", error->message);
@@ -199,10 +196,17 @@ PopplerDocument* open_vfs_document(vfs_t* vfs, const char* vfs_path, int* num_pa
         } else {
             fprintf(stderr, "Error opening doc from bytes (unknown error)\n");
         }
-        return NULL;
+        goto out_unref_bytes;
     }
 
     *num_pages = poppler_document_get_n_pages(doc);
+
+out_unref_bytes:
+    g_bytes_unref(bytes);
+out_free_buffer:
+    g_free(buffer);
+out_close:
+    vfs_fclose(vfs, fd);
     return doc;
 }
 

@@ -216,18 +216,8 @@ CREATE INDEX idx_pages_file_id ON pages(file_id);
 CREATE INDEX idx_pages_lookup ON pages(file_id, page_num);
 ```
 
-### Cache Invalidation
-When updating the database externally, clear the cache:
-```c
-// In your update/delete handlers
-cache_clear(g_response_cache);  // Clear all
-
-// Or invalidate specific entries
-cache_invalidate(g_response_cache, key);
-```
-
 ### Worker Threads
-Adjust `NUM_WORKERS` in your build configuration (default: 8) based on CPU cores and expected load.
+Adjust `NUM_WORKERS` in your build configuration.
 
 ## Web Interface
 
@@ -242,22 +232,6 @@ cd ui
 npm install
 npm run build  # Outputs to ./dist
 ```
-
-## Troubleshooting
-
-### "Connection failed at worker: X"
-- Verify PostgreSQL is running: `pg_isready`
-- Check connection string format: `postgresql://user:pass@host:port/dbname`
-- Ensure user has CREATE/INSERT/SELECT permissions
-
-### "Unable to create table for schema"
-- Check PostgreSQL version supports `tsvector` (9.6+)
-- Verify database exists: `psql -l | grep pdfsearch`
-
-
-### High memory usage
-- Reduce cache capacity: `init_response_cache(512, 300);`
-- Check for memory leaks with valgrind: `valgrind --leak-check=full ./lexicon`
 
 ## License
 
