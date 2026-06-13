@@ -24,6 +24,7 @@ FlagParser *root = NULL, *indexer = NULL;
 
 // Virtual File System image. (exported to other files)
 vfs_t* vfs = NULL;
+char* conn_info = NULL;
 
 // Checks for non-empty postgres connection string.
 void ensure_valid_pgconn_string() {
@@ -50,6 +51,10 @@ static void cli_pre_exec_handler(void* user_data) {
     }
 
     ensure_valid_pgconn_string();
+
+    // Set global variable.
+    conn_info = c->pgconn;
+
     create_connection_pool(c->pgconn);
     create_schema();
     puts("Connected to database and initialized schema");

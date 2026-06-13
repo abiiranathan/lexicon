@@ -47,7 +47,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE _DEFAULT_SOURCE WORKER_COUNT=${WORKER_COUNT})
+target_compile_definitions(${PROJECT_NAME} PRIVATE _GNU_SOURCE WORKER_COUNT=${WORKER_COUNT})
 
 # Enable LTO for Release builds
 if(CMAKE_BUILD_TYPE MATCHES "Release")
