@@ -274,22 +274,9 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
         return;
     }
 
-    char cache_key[CACHE_KEY_MAX_LEN] = {0};
-    size_t key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "render-page:file:%lld:page:%d", (long long)file_id,
-                                      page);
-
-    static const char headers[] = "Content-Type: image/jpeg\r\nCache-Control: public, max-age=3600\r\n";
-
-    /* Serve from cache if available. */
-    size_t cached_len = 0;
-    const char* cached_data = cache_get(g_res_cache, cache_key, key_len, &cached_len);
-    if (cached_data) {
-        size_t length = sizeof(headers) - 1;
-        conn_writeheader_raw(conn, headers, length);
-        conn_write(conn, cached_data, cached_len);
-        cache_release(cached_data);
-        return;
-    }
+    static const char headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
+    size_t length = sizeof(headers) - 1;
+    conn_writeheader_raw(conn, headers, length);
 
     static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
     const char* params[] = {file_id_str};
@@ -302,7 +289,6 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     HANDLE_RECORD_NOT_FOUND(res, conn, "No file found for the requested file");
 
     const char* path = PQgetvalue(res, 0, 0);
-    conn_writeheader_raw(conn, headers, sizeof(headers) - 1);
 
     // Generic open.
     int num_pages;
@@ -321,12 +307,9 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     pdf_buffer_t buf = {0};
     double width, height;
     poppler_page_get_size(ppage, &width, &height);
-    render_page_to_jpeg_buffer(ppage, (int)width, (int)height, &buf);
+    render_page_to_png_buffer(ppage, (int)width, (int)height, &buf);
 
     conn_write(conn, buf.data, buf.size);
-
-    /* TTL of 60 s for rendered page images. */
-    cache_set(g_res_cache, cache_key, key_len, buf.data, buf.size, 60);
 }
 
 /**
