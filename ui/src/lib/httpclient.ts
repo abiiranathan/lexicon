@@ -12,6 +12,7 @@ export async function loadAllFiles(params: FileSearchParams): Promise<FileListRe
     if (params.page) {
         searchParams.append("page", params.page.toString());
     }
+
     const query = searchParams.toString();
     const url = `${baseURL}/api/list-files?${query}`
     const res = await fetch(url)

@@ -10,16 +10,17 @@
 #include "../include/routes.h"
 
 typedef struct {
-    char* vfs_path;   // Path to Virtual File System image containing embedded PDFs.
-    char* bind_addr;  // Address to bind to. Default is NULL (0.0.0.0)
-    char* pgconn;     // postgres connection string.
-    char* root_dir;   // Root Dir of PDFs to index.
-    int port;         // Server port.
-    int min_pages;    // Minimum number of pages in a PDF to be indexable. Default is 4
-    bool dryrun;      // Perform dry-run
+    char* vfs_path;      // Path to Virtual File System image containing embedded PDFs.
+    char* bind_addr;     // Address to bind to. Default is NULL (0.0.0.0)
+    char* pgconn;        // postgres connection string.
+    char* root_dir;      // Root Dir of PDFs to index.
+    char* frontend_dir;  // Directory with build assets
+    int port;            // Server port.
+    int min_pages;       // Minimum number of pages in a PDF to be indexable. Default is 4
+    bool dryrun;         // Perform dry-run
 } AppConfig;
 
-static AppConfig config = {.port = 8080, .min_pages = 4};
+static AppConfig config = {.port = 8080, .min_pages = 4, .frontend_dir = "./ui/dist"};
 FlagParser *root = NULL, *indexer = NULL;
 
 // Virtual File System image. (exported to other files)
@@ -108,6 +109,7 @@ int main(int argc, char* argv[]) {
     flag_int(root, "port", 'p', "The server port", &config.port);
     flag_string(root, "addr", 'a', "Bind address", &config.bind_addr);
     flag_string(root, "pgconn", 'c', "Postgres connection URI", &config.pgconn);
+    flag_string(root, "build-dir", 'd', "Frontend build directory", &config.frontend_dir);
     flag_string(root, "vfs", 'v', "Path to Virtual File System image (.vfs)", &config.vfs_path);
 
     // Index subcommand and its flags.
@@ -127,6 +129,12 @@ int main(int argc, char* argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    if (!is_dir(config.frontend_dir)) {
+        fprintf(stderr, "ERROR: --build-dir must specify a valid directory.\n");
+        flag_print_usage(root);
+        exit(EXIT_FAILURE);
+    }
+
     // Register all routes
     route_get("/api/search", pdf_search);
     route_get("/api/list-files", list_files);
@@ -137,14 +145,13 @@ int main(int argc, char* argv[]) {
     route_get("/api/file/{file_id}/render-page/{page_num}", render_pdf_page_as_png);
 
     // Since we are using / for static assets, put at the end to avoid collisions
-    route_static("/", "./ui/dist");
+    printf("Serving SPA at: %s\n", config.frontend_dir);
+    route_static("/", config.frontend_dir);
     pulsar_set_callback(pulsar_logger, STDOUT_FILENO);
 
     // Attach CORS middleware globally.
     Middleware mw[1] = {cors};
     use_global_middleware(mw, ARRAY_SIZE(mw));
 
-    int code = pulsar_run(config.bind_addr, config.port);
-    printf("Server exited with status code: %d\n", code);
-    return code;
+    return pulsar_run(config.bind_addr, config.port);
 }
