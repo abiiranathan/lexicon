@@ -1,3 +1,4 @@
+<!-- Modal.svelte -->
 <script lang="ts">
   import { searchAPI } from "./lib/httpclient";
 
@@ -27,6 +28,7 @@
   // View mode: 'fit' for zoom/pan, 'scroll' for readable scrolling
   let viewMode = $state<"fit" | "scroll">("scroll");
   let searchQuery = $state("");
+  let showMobileSearch = $state(false);
 
   // Pan and zoom state (only used in 'fit' mode)
   let scale = $state(1);
@@ -69,34 +71,11 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Canvas rendering
-  //
-  // All drawing goes through renderCanvas(). It is the single source of truth
-  // for what appears on screen. Two concerns are kept strictly separate:
-  //
-  //   1. Sizing  — how big the canvas backing store and CSS box are.
-  //   2. Drawing — painting the image into that sized context.
-  //
-  // DPR handling: the canvas backing store is always (CSS px × devicePixelRatio)
-  // in each dimension. We set canvas.width/height in physical pixels, set
-  // canvas.style.width/height in CSS pixels, then call ctx.scale(dpr, dpr)
-  // ONCE so that every subsequent draw call works in CSS-pixel coordinates.
-  // This produces physically sharp pixels on high-DPI screens.
-  //
-  // imageSmoothingQuality = "high" tells the browser to use a high-quality
-  // downscaling filter (typically a Lanczos variant) when the source image is
-  // larger than the draw destination — important for JPEG pages at 150 DPI
-  // being displayed at screen scale.
+  // Canvas rendering (logic intact)
   // ---------------------------------------------------------------------------
 
-  /** Returns true when the current rotation swaps width and height axes. */
   const isLandscapeRotation = $derived(rotation === 90 || rotation === 270);
 
-  /**
-   * Sizes the canvas backing store to match the container at the current DPR
-   * and configures the 2D context for crisp high-DPI rendering.
-   * Returns the context ready for drawing, or null on failure.
-   */
   function prepareContext(
     canvas: HTMLCanvasElement,
     container: HTMLDivElement,
@@ -113,21 +92,13 @@
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return null;
 
-    // Map all subsequent draw calls from CSS pixels to physical pixels.
     ctx.scale(dpr, dpr);
-
-    // High-quality downscaling filter — critical for JPEG source images
-    // rendered at 150 DPI being displayed at a smaller CSS size.
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
 
     return ctx;
   }
 
-  /**
-   * Draws `img` into `ctx` centered on (`cx`, `cy`), rotated by `deg` degrees,
-   * scaled to (`drawWidth` × `drawHeight`) in the rotated coordinate space.
-   */
   function drawRotatedImage(
     ctx: CanvasRenderingContext2D,
     img: HTMLImageElement,
@@ -144,8 +115,6 @@
     ctx.translate(cx, cy);
     ctx.rotate(rad);
 
-    // When rotated 90/270 the natural image axes are swapped relative to the
-    // draw rectangle, so we pass drawHeight/drawWidth to drawImage instead.
     const dw = swapped ? drawHeight : drawWidth;
     const dh = swapped ? drawWidth : drawHeight;
     ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
@@ -153,7 +122,6 @@
     ctx.restore();
   }
 
-  /** Renders the current image into the canvas with all active transforms. */
   function renderCanvas(): void {
     if (!canvasElement || !containerElement || !loadedImage) return;
 
@@ -161,15 +129,11 @@
     const container = containerElement;
     const img = loadedImage;
 
-    // Logical image dimensions after accounting for rotation axis swap.
     const imgW = isLandscapeRotation ? img.height : img.width;
     const imgH = isLandscapeRotation ? img.width : img.height;
     const imgAspect = imgW / imgH;
 
     if (viewMode === "scroll") {
-      // In scroll mode the canvas width is fixed to the container (min 600 px)
-      // and the height follows the image aspect ratio. The user scrolls
-      // vertically to read the page; no zoom/pan state is involved.
       const cssWidth = Math.max(container.clientWidth, 600);
       const cssHeight = cssWidth / imgAspect;
 
@@ -189,9 +153,6 @@
         rotation,
       );
     } else {
-      // In fit mode the canvas fills the container exactly. The image is
-      // letterboxed to fit, then zoom/pan/rotation transforms are applied
-      // on top so the user can inspect details.
       const cssWidth = container.clientWidth;
       const cssHeight = container.clientHeight;
 
@@ -201,7 +162,6 @@
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-      // Letterbox: fit image inside container preserving aspect ratio.
       const containerAspect = cssWidth / cssHeight;
       const drawWidth =
         imgAspect > containerAspect ? cssWidth : cssHeight * imgAspect;
@@ -212,9 +172,6 @@
       const cy = cssHeight / 2;
 
       ctx.save();
-
-      // Zoom and pan are applied around the canvas centre so that scaling
-      // feels anchored to the middle of the viewport, not the top-left corner.
       ctx.translate(cx, cy);
       ctx.scale(scale, scale);
       ctx.translate(-cx + translateX, -cy + translateY);
@@ -225,7 +182,6 @@
     }
   }
 
-  // Load image from blob whenever modalContent.imageBlob changes.
   $effect(() => {
     if (!modalContent?.imageBlob || !canvasElement || !containerElement) {
       imageLoaded = false;
@@ -233,7 +189,6 @@
       return;
     }
 
-    // Reset transform state for the incoming page.
     scale = 1;
     translateX = 0;
     translateY = 0;
@@ -248,8 +203,6 @@
       loadedImage = img;
       imageLoaded = true;
       URL.revokeObjectURL(url);
-      // Initial render happens via the render effect below reacting to
-      // imageLoaded becoming true; no explicit call needed here.
     };
 
     img.onerror = () => {
@@ -261,26 +214,13 @@
     img.src = url;
   });
 
-  // Re-render whenever any piece of render state changes. Svelte 5 tracks
-  // which $state variables are read inside an $effect, so listing them
-  // explicitly here (rather than the `void x` hack) is both correct and
-  // readable. renderCanvas() reads: loadedImage, viewMode, scale, translateX,
-  // translateY, rotation, and isLandscapeRotation (derived from rotation).
   $effect(() => {
     if (!imageLoaded || !loadedImage) return;
-
-    // Reading these here is what makes Svelte track them as dependencies of
-    // this effect. Any change to any of them triggers a re-render.
     const _ = [scale, translateX, translateY, viewMode, rotation];
     void _;
-
     renderCanvas();
   });
 
-  // Re-render on container resize using ResizeObserver, which fires only when
-  // the element's size actually changes — more accurate than window 'resize'
-  // (which misses element-level reflows) and avoids the cost of a global
-  // listener when the modal is closed.
   $effect(() => {
     if (!isOpen || !containerElement) return;
 
@@ -294,7 +234,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Input handlers
+  // Input handlers (logic intact)
   // ---------------------------------------------------------------------------
 
   function handleWheel(e: WheelEvent): void {
@@ -537,6 +477,7 @@
     );
     searchResults = { results: [] };
     searchQuery = "";
+    showMobileSearch = false;
   };
 
   function highlightText(text: string): string {
@@ -561,10 +502,31 @@
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="modal-content" onclick={(e: Event) => e.stopPropagation()}>
+      <!-- Top header bar: persistent on desktop, slimmed on mobile -->
       <div class="modal-header">
-        <h3 id="modal-title">{modalContent.title}</h3>
+        <div class="header-left">
+          <button
+            class="modal-close-btn mobile-only"
+            onclick={onClose}
+            aria-label="Close"
+          >
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+          <h3 id="modal-title">{modalContent.title}</h3>
+        </div>
 
-        <div class="modal-controls">
+        <!-- Desktop Controls Block -->
+        <div class="desktop-controls-wrapper desktop-only">
           {#if modalContent.file_id && modalContent.filename && modalContent.page && modalContent.num_pages && modalContent.num_pages > 1}
             <div class="page-navigation">
               <button
@@ -575,14 +537,12 @@
                 title="Previous (←)"
               >
                 <svg
-                  width="20"
-                  height="20"
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
                   stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
                 >
                   <polyline points="15 18 9 12 15 6"></polyline>
                 </svg>
@@ -626,14 +586,12 @@
                 title="Next (→)"
               >
                 <svg
-                  width="20"
-                  height="20"
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
                   stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
                 >
                   <polyline points="9 18 15 12 9 6"></polyline>
                 </svg>
@@ -649,14 +607,12 @@
               title="Rotate (Shift+R)"
             >
               <svg
-                width="20"
-                height="20"
+                width="18"
+                height="18"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
               >
                 <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"
                 ></path>
@@ -664,7 +620,7 @@
               </svg>
             </button>
             <button
-              class="nav-button view-mode-toggle"
+              class="nav-button"
               onclick={toggleViewMode}
               aria-label={viewMode === "scroll"
                 ? "Switch to zoom mode"
@@ -675,14 +631,12 @@
             >
               {#if viewMode === "scroll"}
                 <svg
-                  width="20"
-                  height="20"
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
                   stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
                 >
                   <circle cx="11" cy="11" r="8"></circle>
                   <line x1="11" y1="8" x2="11" y2="14"></line>
@@ -691,14 +645,12 @@
                 </svg>
               {:else}
                 <svg
-                  width="20"
-                  height="20"
+                  width="18"
+                  height="18"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
                   stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
                 >
                   <path d="M8 3H5a2 2 0 0 0-2 2v3"></path>
                   <path d="M21 8V5a2 2 0 0 0-2-2h-3"></path>
@@ -717,14 +669,12 @@
                   title="Zoom out (-)"
                 >
                   <svg
-                    width="20"
-                    height="20"
+                    width="18"
+                    height="18"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
                     stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
                   >
                     <circle cx="11" cy="11" r="8"></circle>
                     <line x1="8" y1="11" x2="14" y2="11"></line>
@@ -732,7 +682,7 @@
                   </svg>
                 </button>
 
-                <span class="zoom-level" title="Reset zoom (r)">
+                <span class="zoom-level">
                   {Math.round(scale * 100)}%
                 </span>
 
@@ -743,14 +693,12 @@
                   title="Zoom in (+)"
                 >
                   <svg
-                    width="20"
-                    height="20"
+                    width="18"
+                    height="18"
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
                     stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
                   >
                     <circle cx="11" cy="11" r="8"></circle>
                     <line x1="11" y1="8" x2="11" y2="14"></line>
@@ -758,102 +706,115 @@
                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                   </svg>
                 </button>
-
-                <button
-                  class="nav-button"
-                  onclick={resetTransform}
-                  aria-label="Reset view"
-                  title="Reset view (r)"
-                >
-                  <svg
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"
-                    ></path>
-                    <path d="M21 3v5h-5"></path>
-                    <path
-                      d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"
-                    ></path>
-                    <path d="M3 21v-5h5"></path>
-                  </svg>
-                </button>
               </div>
             {/if}
           {/if}
         </div>
 
-        <div class="search-wrapper">
-          <input
-            type="text"
-            class="search_book"
-            id="search_book"
-            placeholder="Search this book"
-            bind:value={searchQuery}
-            onkeydown={(e: KeyboardEvent) => {
-              if (e.key == "Enter") {
-                handleSearch(searchQuery);
-              }
-            }}
-          />
-          <!-- Search results dropdown -->
-          {#if searchQuery.length > 0 && (isSearching || searchError || searchResults.results.length > 0)}
-            <div class="search-results-dropdown">
-              {#if isSearching}
-                <div class="result-message">
-                  Searching for "{searchQuery}"...
-                </div>
-              {:else if searchError}
-                <div class="result-message error-message-dropdown">
-                  Search Error: {searchError}
-                </div>
-              {:else if searchResults.results.length === 0}
-                <div class="result-message">
-                  No results found for "{searchQuery}"
-                </div>
-              {:else}
-                <ul class="results-list">
-                  {#each searchResults.results as result (result.file_id + "-" + result.page_num)}
-                    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                    <li
-                      class="search-result-item"
-                      onclick={() => handleResultClick(result)}
-                    >
-                      <div class="result-header-row">
-                        <span class="result-title">{result.file_name}</span>
-                        <span class="result-page">Page {result.page_num}</span>
-                      </div>
-                      <p class="result-snippet">
-                        {@html highlightText(result.snippet)}
-                      </p>
-                    </li>
-                  {/each}
-                </ul>
-                <div class="result-footer">
-                  {searchResults.results.length} results found.
-                </div>
-              {/if}
-            </div>
-          {/if}
+        <div class="header-right">
+          <div class="search-wrapper" class:mobile-active={showMobileSearch}>
+            <input
+              type="text"
+              class="search_book"
+              placeholder="Search in file..."
+              bind:value={searchQuery}
+              onkeydown={(e: KeyboardEvent) => {
+                if (e.key === "Enter") {
+                  handleSearch(searchQuery);
+                }
+              }}
+            />
+            {#if showMobileSearch}
+              <button
+                class="mobile-search-close"
+                onclick={() => {
+                  showMobileSearch = false;
+                  searchQuery = "";
+                }}
+              >
+                Cancel
+              </button>
+            {/if}
+
+            <!-- Search dropdown results -->
+            {#if searchQuery.length > 0 && (isSearching || searchError || searchResults.results.length > 0)}
+              <div class="search-results-dropdown">
+                {#if isSearching}
+                  <div class="result-message">Searching inside document...</div>
+                {:else if searchError}
+                  <div class="result-message error-message-dropdown">
+                    Error: {searchError}
+                  </div>
+                {:else if searchResults.results.length === 0}
+                  <div class="result-message">No results found</div>
+                {:else}
+                  <ul class="results-list">
+                    {#each searchResults.results as result}
+                      <!-- svelte-ignore a11y_click_events_have_key_events -->
+                      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                      <li
+                        class="search-result-item"
+                        onclick={() => handleResultClick(result)}
+                      >
+                        <div class="result-header-row">
+                          <span class="result-page">Page {result.page_num}</span
+                          >
+                        </div>
+                        <p class="result-snippet">
+                          {@html highlightText(result.snippet)}
+                        </p>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </div>
+            {/if}
+          </div>
+
+          <button
+            class="mobile-search-trigger mobile-only"
+            onclick={() => (showMobileSearch = true)}
+            aria-label="Search inside document"
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+          </button>
+
+          <button
+            class="modal-close-btn desktop-only"
+            onclick={onClose}
+            aria-label="Close Dialog"
+            title="Close (Esc)"
+          >
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
         </div>
-        <button
-          class="modal-close"
-          onclick={onClose}
-          aria-label="Close"
-          title="Close (Esc)">&times;</button
-        >
       </div>
 
+      <!-- Main viewport for canvas -->
       <div class="modal-body" class:scroll-mode={viewMode === "scroll"}>
         {#if modalContent.error}
           <div class="error-message">
-            Failed to load: {modalContent.error}
+            Failed to render: {modalContent.error}
           </div>
         {:else if modalContent.imageBlob}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -877,11 +838,135 @@
               class:fit-mode={viewMode === "fit"}
             ></canvas>
             {#if !imageLoaded}
-              <div class="loading-indicator">Loading...</div>
+              <div class="loading-indicator">
+                <div class="spinner"></div>
+              </div>
             {/if}
           </div>
         {/if}
       </div>
+
+      <!-- Mobile Floating Navigation / HUD Bar -->
+      {#if imageLoaded && modalContent.num_pages > 1}
+        <div class="mobile-hud mobile-only">
+          <button
+            class="hud-btn"
+            onclick={viewPrevPage}
+            disabled={modalContent.page === 1}
+            aria-label="Previous page"
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+            >
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+          </button>
+
+          <div class="hud-center">
+            {#if showPageInput}
+              <form
+                class="hud-form"
+                onsubmit={(e: Event) => {
+                  e.preventDefault();
+                  handlePageJump();
+                }}
+              >
+                <input
+                  type="number"
+                  class="hud-input"
+                  bind:value={pageInputValue}
+                  placeholder={modalContent.page.toString()}
+                  min="1"
+                  max={modalContent.num_pages}
+                />
+              </form>
+            {:else}
+              <button class="hud-page-indicator" onclick={togglePageInput}>
+                {modalContent.page} / {modalContent.num_pages}
+              </button>
+            {/if}
+          </div>
+
+          <div class="hud-actions">
+            <button
+              class="hud-action-btn"
+              onclick={rotateImage}
+              aria-label="Rotate view"
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"
+                ></path>
+                <path d="M21 3v5h-5"></path>
+              </svg>
+            </button>
+            <button
+              class="hud-action-btn"
+              onclick={toggleViewMode}
+              aria-label="View mode toggle"
+            >
+              {#if viewMode === "scroll"}
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="11" y1="8" x2="11" y2="14"></line>
+                  <line x1="8" y1="11" x2="14" y2="11"></line>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+              {:else}
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path d="M8 3H5a2 2 0 0 0-2 2v3"></path>
+                  <path d="M21 8V5a2 2 0 0 0-2-2h-3"></path>
+                  <path d="M3 16v3a2 2 0 0 0 2 2h3"></path>
+                  <path d="M16 21h3a2 2 0 0 0 2-2v-3"></path>
+                </svg>
+              {/if}
+            </button>
+          </div>
+
+          <button
+            class="hud-btn"
+            onclick={viewNextPage}
+            disabled={modalContent.page === modalContent.num_pages}
+            aria-label="Next page"
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+            >
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </button>
+        </div>
+      {/if}
     </div>
   </div>
 {/if}
@@ -893,74 +978,75 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(2, 6, 23, 0.85);
-    backdrop-filter: blur(4px);
+    background: rgba(3, 7, 18, 0.9);
+    backdrop-filter: blur(8px);
     z-index: 9999;
-    padding: 1rem;
+    padding: 1.5rem;
   }
 
   .modal-content {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 0.75rem;
-    max-width: 1600px;
+    border-radius: 1rem;
+    max-width: 1400px;
     width: 100%;
     height: 100%;
     display: flex;
     flex-direction: column;
     color: var(--text-primary);
-    box-shadow: 0 20px 40px rgba(2, 6, 23, 0.6);
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.8);
+    position: relative;
+    overflow: hidden;
   }
 
   .modal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0.75rem 1rem;
+    padding: 1rem 1.5rem;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-    gap: 1rem;
-    position: relative;
+    gap: 1.5rem;
+    background: rgba(17, 24, 39, 0.6);
   }
 
-  .modal-header h3 {
-    flex: 0 1 auto;
-    max-width: 30%;
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+    flex: 1;
   }
 
-  .modal-header h3 {
+  .header-left h3 {
     margin: 0;
-    color: var(--text-primary);
-    font-size: 1.125rem;
+    font-size: 1rem;
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex: 1;
-    min-width: 0;
   }
 
-  .modal-controls {
+  .header-right {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    flex-shrink: 0;
+    gap: 1rem;
   }
 
-  .search-wrapper {
-    position: relative;
-    flex: 1; /* Allow wrapper to take available space */
-    min-width: 200px; /* Ensure minimum space */
-    max-width: 500px; /* Control max width of search area */
+  .desktop-controls-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
   }
 
+  /* Shared HUD/Nav element layouts */
   .page-navigation,
   .zoom-controls {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.25rem 0.5rem;
-    background: var(--background, rgba(0, 0, 0, 0.1));
+    gap: 0.25rem;
+    padding: 0.25rem;
+    background: rgba(0, 0, 0, 0.2);
     border-radius: 0.5rem;
     border: 1px solid var(--border);
   }
@@ -968,19 +1054,19 @@
   .nav-button {
     background: transparent;
     border: none;
-    color: var(--text-primary);
+    color: var(--text-secondary);
     cursor: pointer;
-    padding: 0.25rem;
+    padding: 0.375rem;
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 0.25rem;
-    transition: all 0.2s;
+    border-radius: 0.375rem;
+    transition: all 0.15s;
   }
 
   .nav-button:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--accent, #60a5fa);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
   }
 
   .nav-button:disabled {
@@ -988,18 +1074,13 @@
     cursor: not-allowed;
   }
 
-  .view-mode-toggle {
-    padding: 0.25rem 0.5rem;
-    background: var(--background, rgba(0, 0, 0, 0.1));
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
-  }
-
   .page-indicator,
   .zoom-level {
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-    min-width: 4rem;
+    font-size: 0.8125rem;
+    color: var(--text-primary);
+    padding: 0.25rem 0.5rem;
+    font-weight: 500;
+    min-width: 3.5rem;
     text-align: center;
     font-variant-numeric: tabular-nums;
   }
@@ -1008,20 +1089,11 @@
     background: transparent;
     border: none;
     cursor: pointer;
-    padding: 0.25rem 0.5rem;
-    border-radius: 0.25rem;
-    transition: all 0.2s;
+    border-radius: 0.375rem;
   }
 
   .page-indicator:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--text-primary);
-  }
-
-  .zoom-level {
-    min-width: 3rem;
-    padding: 0.25rem 0.5rem;
-    cursor: default;
+    background: rgba(255, 255, 255, 0.05);
   }
 
   .page-jump-form {
@@ -1031,45 +1103,137 @@
   }
 
   .page-jump-input {
-    width: 3.5rem;
-    padding: 0.25rem 0.5rem;
-    font-size: 0.875rem;
-    background: var(--surface);
+    width: 2.75rem;
+    padding: 0.125rem 0.25rem;
+    font-size: 0.8125rem;
+    background: var(--background);
     border: 1px solid var(--border);
     border-radius: 0.25rem;
     color: var(--text-primary);
     text-align: center;
-    font-variant-numeric: tabular-nums;
   }
 
   .page-jump-input:focus {
     outline: none;
-    border-color: var(--accent, #60a5fa);
+    border-color: var(--primary);
   }
 
   .page-max {
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     color: var(--text-secondary);
-    font-variant-numeric: tabular-nums;
   }
 
-  .modal-close {
+  .modal-close-btn {
     background: transparent;
     border: none;
     color: var(--text-secondary);
-    font-size: 1.5rem;
     cursor: pointer;
-    padding: 0.25rem 0.5rem;
-    line-height: 1;
-    transition: color 0.2s;
-    border-radius: 0.25rem;
+    padding: 0.375rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.5rem;
+    transition: all 0.15s;
+    border: 1px solid transparent;
   }
 
-  .modal-close:hover {
+  .modal-close-btn:hover {
     color: var(--text-primary);
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    border-color: var(--border);
   }
 
+  /* Inline Document Search styling */
+  .search-wrapper {
+    position: relative;
+    width: 220px;
+  }
+
+  .search_book {
+    width: 100%;
+    outline: none;
+    padding: 0.45rem 1rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border);
+    background: rgba(0, 0, 0, 0.25);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    transition: all 0.15s;
+  }
+
+  .search_book:focus {
+    border-color: var(--primary);
+    background: rgba(0, 0, 0, 0.4);
+    box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.25);
+  }
+
+  .search-results-dropdown {
+    position: absolute;
+    top: calc(100% + 0.5rem);
+    right: 0;
+    width: 300px;
+    z-index: 1000;
+    background: #1f2937;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+    max-height: 350px;
+    overflow-y: auto;
+  }
+
+  .results-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .search-result-item {
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    transition: background 0.15s;
+  }
+
+  .search-result-item:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .result-header-row {
+    margin-bottom: 0.25rem;
+  }
+
+  .result-page {
+    font-size: 0.75rem;
+    color: #818cf8;
+    font-weight: 600;
+  }
+
+  .result-snippet {
+    color: var(--text-secondary);
+    margin: 0;
+    line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .result-snippet :global(mark) {
+    background: rgba(245, 158, 11, 0.3);
+    color: #f59e0b;
+    border-radius: 2px;
+    padding: 0 1px;
+  }
+
+  .result-message {
+    padding: 1rem;
+    text-align: center;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+  }
+
+  /* Viewport canvas workspace wrapper */
   .modal-body {
     flex: 1;
     overflow: hidden;
@@ -1078,20 +1242,12 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    background: #0f1319;
   }
 
   .modal-body.scroll-mode {
     overflow-y: auto;
     align-items: flex-start;
-  }
-
-  .error-message {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    color: var(--error);
-    padding: 1rem;
-    border-radius: 0.75rem;
-    margin: 1rem;
   }
 
   .canvas-container {
@@ -1110,10 +1266,12 @@
     overflow-x: auto;
     overflow-y: visible;
     touch-action: auto;
+    padding: 2rem 0;
   }
 
   .page-canvas {
     display: block;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
   }
 
   .page-canvas.fit-mode {
@@ -1134,216 +1292,191 @@
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    color: var(--text-secondary);
-    font-size: 0.875rem;
+    background: rgba(0, 0, 0, 0.8);
+    padding: 1rem;
+    border-radius: 50%;
   }
 
-  .search_book {
-    width: 100%;
-    outline: none;
-    padding: 0.5rem 1rem;
-    border-radius: 30px;
-    border: 2px solid var(--border, #222); /* Using CSS var for consistency */
-    background: var(--surface, #1e293b);
-    color: var(--text-primary, #f8fafc);
+  .spinner {
+    width: 1.5rem;
+    height: 1.5rem;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
   }
 
-  .search-results-dropdown {
-    position: absolute;
-    top: 100%; /* Position right below the input */
-    left: 0;
-    right: 0;
-    z-index: 10000; /* Higher than modal-content but below close button if necessary */
-    background: var(--surface-light, #334155);
-    border: 1px solid var(--border, #475569);
-    border-radius: 0 0 0.5rem 0.5rem;
-    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
-    max-height: 400px;
-    overflow-y: auto;
-    margin-top: 2px; /* Small gap from the input */
-  }
-
-  .results-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-
-  .search-result-item {
-    padding: 0.75rem 1rem;
-    cursor: pointer;
-    transition: background-color 0.15s;
-    border-bottom: 1px solid var(--border-light, #334155);
-  }
-
-  .search-result-item:hover {
-    background: var(--hover-bg, #475569);
-  }
-
-  .result-header-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.25rem;
-  }
-
-  .result-title {
-    font-weight: 600;
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .result-page {
-    font-size: 0.75rem;
-    color: var(--accent, #60a5fa);
-    font-weight: 500;
-    flex-shrink: 0;
-    margin-left: 0.5rem;
-  }
-
-  .result-snippet {
-    font-size: 1rem;
-    color: var(--text-secondary);
-    margin: 0;
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    line-clamp: 4;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .result-message,
-  .result-footer {
-    padding: 0.75rem 1rem;
-    text-align: center;
-    font-size: 0.875rem;
-    color: var(--text-secondary);
-  }
-
-  .error-message-dropdown {
+  .error-message {
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.3);
     color: var(--error);
+    padding: 1rem 1.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+  }
+
+  /* Desktop and Mobile Responsiveness Controls styling */
+  .desktop-only {
+    display: flex;
+  }
+
+  .mobile-only {
+    display: none !important;
   }
 
   @media (max-width: 768px) {
+    .desktop-only {
+      display: none !important;
+    }
+
+    .mobile-only {
+      display: flex !important;
+    }
+
     .modal {
       padding: 0;
-      align-items: stretch;
     }
 
     .modal-content {
       height: 100vh;
-      max-height: 100vh;
       border-radius: 0;
+      border: none;
     }
 
     .modal-header {
-      padding: 0.5rem;
-      flex-wrap: wrap;
-    }
-
-    .modal-header h3 {
-      font-size: 0.9rem;
-      order: 1;
-      flex: 0 1 auto;
-      max-width: calc(100% - 3rem);
-    }
-
-    .modal-close {
-      order: 2;
-      font-size: 1.75rem;
-      padding: 0.25rem;
-    }
-
-    .modal-controls {
-      order: 3;
-      flex: 1 1 100%;
-      justify-content: center;
-      gap: 0.5rem;
-      margin-top: 0.5rem;
-    }
-
-    .page-navigation,
-    .zoom-controls {
-      padding: 0.25rem 0.5rem;
+      padding: 0.75rem 1rem;
       gap: 0.5rem;
     }
 
+    /* Expanding search bar on mobile */
     .search-wrapper {
-      order: 4; /* Place search below controls on small screens */
-      flex: 1 1 100%;
-      max-width: 100%;
-      margin-top: 0.5rem;
+      display: none;
+      width: 100%;
+    }
+
+    .search-wrapper.mobile-active {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      position: absolute;
+      inset: 0;
+      background: var(--surface);
+      padding: 0.5rem 1rem;
+      z-index: 10;
+    }
+
+    .mobile-search-close {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      font-weight: 500;
+      white-space: nowrap;
     }
 
     .search-results-dropdown {
-      max-height: 300px;
+      top: 100%;
+      left: 0;
+      right: 0;
+      width: 100%;
+      border-radius: 0 0 1rem 1rem;
+      border-top: none;
+      max-height: calc(100vh - 120px);
     }
 
-    .nav-button svg {
-      width: 18px;
-      height: 18px;
+    .mobile-search-trigger {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      padding: 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
-    .page-indicator,
-    .zoom-level {
-      font-size: 0.8125rem;
-      min-width: 3.5rem;
-      padding: 0.25rem;
+    /* Floating bottom HUD pill design */
+    .mobile-hud {
+      position: absolute;
+      bottom: 1.5rem;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(31, 41, 55, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: 9999px;
+      padding: 0.5rem 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      z-index: 100;
     }
 
-    .zoom-level {
-      min-width: 2.5rem;
+    .hud-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: none;
+      color: var(--text-primary);
+      width: 2.25rem;
+      height: 2.25rem;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
     }
 
-    .page-jump-input {
+    .hud-btn:disabled {
+      opacity: 0.3;
+    }
+
+    .hud-center {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .hud-page-indicator {
+      background: transparent;
+      border: none;
+      color: var(--text-primary);
+      font-size: 0.875rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .hud-form {
+      display: flex;
+    }
+
+    .hud-input {
       width: 3rem;
-      font-size: 0.8125rem;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--border);
+      border-radius: 0.25rem;
+      color: white;
+      text-align: center;
+      font-size: 0.875rem;
+      padding: 0.125rem;
     }
 
-    .page-max {
-      font-size: 0.8125rem;
-    }
-  }
-
-  @media (max-width: 480px) {
-    .modal-header h3 {
-      font-size: 0.8125rem;
-    }
-
-    .page-navigation,
-    .zoom-controls {
-      padding: 0.2rem 0.4rem;
+    .hud-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+      padding: 0 0.75rem;
     }
 
-    .nav-button {
-      padding: 0.2rem;
-    }
-
-    .nav-button svg {
-      width: 16px;
-      height: 16px;
-    }
-
-    .page-indicator,
-    .zoom-level {
-      font-size: 0.75rem;
-      min-width: 3rem;
-    }
-
-    .zoom-level {
-      min-width: 2rem;
-    }
-
-    .page-jump-input {
-      width: 2.5rem;
-      font-size: 0.75rem;
-    }
-
-    .page-max {
-      font-size: 0.75rem;
+    .hud-action-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      padding: 0.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
   }
 </style>

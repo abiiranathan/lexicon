@@ -1,3 +1,4 @@
+<!-- FilesList.svelte -->
 <script lang="ts">
   import PDFLogo from "./PDFLogo.svelte";
 
@@ -9,7 +10,7 @@
       fileId: number,
       pageNum: number,
       numPages: number,
-      fileName: string
+      fileName: string,
     ) => void;
   };
 
@@ -22,87 +23,84 @@
 
 <div class="files-container">
   {#if isLoading}
-    <div class="loading-state">Loading files...</div>
+    <div class="loading-state">
+      <div class="loading-spinner"></div>
+      <p>Retrieving documents...</p>
+    </div>
   {:else if error}
-    <div class="error-state">Failed to load files: {error}</div>
+    <div class="error-state">
+      <svg
+        width="24"
+        height="24"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+      <span>Failed to load files: {error}</span>
+    </div>
   {:else if files && files.results.length > 0}
     <div class="files-grid">
       {#each files.results as file}
-        <!-- svelte-ignore a11y_interactive_supports_focus -->
-        <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <div
+        <button
           class="file-card"
           onclick={() => handleFileClick(file)}
-          role="button"
-          tabindex="0"
-          onkeyup={(e) => {
-            if (e.key === "Enter") {
-              handleFileClick(file);
-            }
-          }}
+          type="button"
         >
-          <PDFLogo />
-          <div class="file-info">
-            <div class="file-name">{file.name}</div>
+          <div class="logo-wrapper">
+            <PDFLogo />
+          </div>
+          <div class="file-details">
+            <div class="file-name" title={file.name}>{file.name}</div>
             <div class="file-meta">
-              {file.num_pages}
-              {file.num_pages === 1 ? "page" : "pages"}
+              <span class="badge">
+                {file.num_pages}
+                {file.num_pages === 1 ? "page" : "pages"}
+              </span>
             </div>
           </div>
-        </div>
+          <div class="file-action-arrow">
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M5 12h14M12 5l7 7-7 7" />
+            </svg>
+          </div>
+        </button>
       {/each}
     </div>
   {:else}
     <div class="empty-state">
-      <svg
-        class="empty-icon"
-        viewBox="0 0 64 64"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <rect
-          x="16"
-          y="12"
-          width="32"
-          height="40"
-          rx="2"
+      <div class="empty-icon-wrapper">
+        <svg
+          class="empty-icon"
+          viewBox="0 0 24 24"
+          fill="none"
           stroke="currentColor"
-          stroke-width="2"
-          opacity="0.3"
-        />
-        <line
-          x1="24"
-          y1="24"
-          x2="40"
-          y2="24"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          opacity="0.3"
-        />
-        <line
-          x1="24"
-          y1="32"
-          x2="40"
-          y2="32"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          opacity="0.3"
-        />
-        <line
-          x1="24"
-          y1="40"
-          x2="34"
-          y2="40"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          opacity="0.3"
-        />
-      </svg>
-      <p class="empty-title">No files found</p>
-      <p class="empty-description">Upload some PDF files to get started</p>
+          stroke-width="1.5"
+        >
+          <path
+            d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+          />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="16" y1="13" x2="8" y2="13" />
+          <line x1="16" y1="17" x2="8" y2="17" />
+          <polyline points="10 9 9 9 8 9" />
+        </svg>
+      </div>
+      <h3 class="empty-title">No matching files found</h3>
+      <p class="empty-description">
+        Ensure your filter query is correct or import new files.
+      </p>
     </div>
   {/if}
 </div>
@@ -112,126 +110,186 @@
     width: 100%;
   }
 
-  .loading-state,
-  .error-state {
-    text-align: center;
-    padding: 3rem 1rem;
+  .loading-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 5rem 1rem;
+    gap: 1rem;
     color: var(--text-secondary);
   }
 
+  .loading-spinner {
+    width: 2.5rem;
+    height: 2.5rem;
+    border: 3px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   .error-state {
-    color: var(--error, #ef4444);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 3rem 1rem;
+    color: var(--error);
+    background: rgba(239, 68, 68, 0.05);
+    border: 1px dashed rgba(239, 68, 68, 0.2);
+    border-radius: 1rem;
   }
 
   .files-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
     gap: 1rem;
   }
 
   .file-card {
     display: flex;
     align-items: center;
-    gap: 1rem;
-    padding: 1rem;
-    background: var(--surface, #ffffff);
-    border: 1px solid var(--border, #e2e8f0);
-    border-radius: 0.75rem;
+    gap: 1.25rem;
+    padding: 1.25rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border);
+    border-radius: 1rem;
     cursor: pointer;
-    transition: all 0.2s ease;
+    text-align: left;
+    width: 100%;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .file-card::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+    background: var(--primary);
+    transform: scaleY(0);
+    transition: transform 0.2s ease;
   }
 
   .file-card:hover {
-    background: var(--surface-hover, #f8fafc);
-    border-color: var(--accent, #60a5fa);
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(79, 70, 229, 0.3);
     transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    box-shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.5);
   }
 
-  .file-card:focus {
-    outline: 2px solid var(--accent, #60a5fa);
+  .file-card:hover::before {
+    transform: scaleY(1);
+  }
+
+  .file-card:focus-visible {
+    outline: 2px solid var(--primary);
     outline-offset: 2px;
   }
 
-  .file-info {
+  .logo-wrapper {
+    background: rgba(239, 68, 68, 0.08);
+    padding: 0.5rem;
+    border-radius: 0.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .file-details {
     flex: 1;
     min-width: 0;
   }
 
   .file-name {
+    font-size: 0.9375rem;
     font-weight: 600;
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    margin-bottom: 0.25rem;
+    margin-bottom: 0.375rem;
   }
 
   .file-meta {
-    font-size: 0.875rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .badge {
+    font-size: 0.75rem;
+    font-weight: 500;
     color: var(--text-secondary);
+    background: rgba(255, 255, 255, 0.05);
+    padding: 0.125rem 0.5rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--border);
+  }
+
+  .file-action-arrow {
+    color: var(--text-muted);
+    opacity: 0;
+    transform: translateX(-4px);
+    transition: all 0.2s ease;
+  }
+
+  .file-card:hover .file-action-arrow {
+    opacity: 1;
+    transform: translateX(0);
+    color: var(--primary);
   }
 
   .empty-state {
     text-align: center;
-    padding: 4rem 1rem;
-    color: var(--text-secondary);
+    padding: 5rem 1.5rem;
+  }
+
+  .empty-icon-wrapper {
+    background: rgba(255, 255, 255, 0.02);
+    width: 4rem;
+    height: 4rem;
+    border-radius: 1.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 1.5rem;
+    border: 1px solid var(--border);
   }
 
   .empty-icon {
-    width: 80px;
-    height: 80px;
-    margin: 0 auto 1.5rem;
+    width: 2rem;
+    height: 2rem;
     color: var(--text-secondary);
   }
 
   .empty-title {
-    font-size: 1.25rem;
+    font-size: 1.125rem;
     font-weight: 600;
     color: var(--text-primary);
-    margin: 0 0 0.5rem 0;
+    margin-bottom: 0.5rem;
   }
 
   .empty-description {
-    font-size: 0.9375rem;
+    font-size: 0.875rem;
     color: var(--text-secondary);
-    margin: 0;
+    max-width: 320px;
+    margin: 0 auto;
   }
 
-  @media (max-width: 640px) {
+  @media (max-width: 768px) {
     .files-grid {
-      /* grid-template-columns: 1fr; */
-      gap: 0.75rem;
-    }
-
-    .file-card {
-      padding: 0.875rem;
-      gap: 0.875rem;
-    }
-
-    .file-name {
-      font-size: 0.9375rem;
-    }
-
-    .file-meta {
-      font-size: 0.8125rem;
-    }
-
-    .empty-state {
-      padding: 3rem 1rem;
-    }
-
-    .empty-icon {
-      width: 64px;
-      height: 64px;
-    }
-
-    .empty-title {
-      font-size: 1.125rem;
-    }
-
-    .empty-description {
-      font-size: 0.875rem;
+      grid-template-columns: 1fr;
     }
   }
 </style>

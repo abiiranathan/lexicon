@@ -441,7 +441,7 @@ void list_files(PulsarCtx* ctx) {
     /* Build cache key from pagination params and optional name filter. */
     char cache_key[CACHE_KEY_MAX_LEN] = {0};
     size_t key_len;
-    if (!name) {
+    if (name) {
         key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d:n%s", page, page_size, name);
     } else {
         key_len = (size_t)snprintf(cache_key, sizeof(cache_key), "list:p%d:l%d", page, page_size);

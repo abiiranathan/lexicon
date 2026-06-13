@@ -1,3 +1,4 @@
+<!-- SearchSection.svelte -->
 <script lang="ts">
   import type { LocalStore } from "./lib/localstorage.svelte";
 
@@ -21,20 +22,23 @@
     <input
       type="text"
       class="search-input"
-      placeholder="Search through your documents..."
+      placeholder="Search term or phrase..."
       bind:value={query}
       onkeypress={(e: any) => e.key === "Enter" && onsubmit()}
       autocomplete="off"
     />
-    <!-- svelte-ignore a11y_consider_explicit_label -->
-    <button class="search-button" onclick={onsubmit}>
+    <button
+      class="search-button"
+      onclick={onsubmit}
+      aria-label="Execute search"
+    >
       <svg
-        width="20"
-        height="20"
+        width="18"
+        height="18"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
-        stroke-width="2"
+        stroke-width="2.5"
       >
         <circle cx="11" cy="11" r="8"></circle>
         <path d="m21 21-4.35-4.35"></path>
@@ -48,63 +52,62 @@
       class:active={currentTab.value === "search"}
       onclick={() => onTabSwitch("search")}
     >
-      Search Results
+      Search
     </button>
     <button
       class="tab"
       class:active={currentTab.value === "files"}
       onclick={() => onTabSwitch("files")}
     >
-      Browse Files
+      Library
     </button>
   </div>
 </section>
 
 <style>
   .search-section {
-    background: rgba(30, 41, 59, 0.8);
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(148, 163, 184, 0.2);
-    border-radius: 1.5rem;
-    padding: 2rem;
+    background: rgba(17, 24, 39, 0.4);
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+    padding: 1.5rem;
     margin-bottom: 2rem;
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
-    animation: fadeInUp 0.6s ease-out 0.1s both;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
   }
 
   .search-container {
     position: relative;
-    margin-bottom: 1.5rem;
+    margin-bottom: 1.25rem;
   }
 
   .search-input {
     width: 100%;
-    padding: 1rem 3.5rem 1rem 1.5rem;
-    background: var(--surface);
-    border: 2px solid var(--border);
-    border-radius: 1rem;
+    padding: 0.875rem 3.5rem 0.875rem 1.25rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
     color: var(--text-primary);
-    font-size: 1.1rem;
-    transition: all 0.3s ease;
+    font-size: 1rem;
+    transition: all 0.2s ease;
   }
 
   .search-input:focus {
     outline: none;
     border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
   }
 
   .search-button {
     position: absolute;
-    right: 0.5rem;
+    right: 0.375rem;
     top: 50%;
     transform: translateY(-50%);
     background: var(--primary);
     border: none;
-    padding: 0.75rem;
-    border-radius: 0.75rem;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 0.5rem;
     cursor: pointer;
-    transition: all 0.3s ease;
+    transition: all 0.15s ease;
     color: white;
     display: flex;
     align-items: center;
@@ -113,7 +116,6 @@
 
   .search-button:hover {
     background: var(--primary-hover);
-    transform: translateY(-50%) scale(1.05);
   }
 
   .tabs {
@@ -122,34 +124,25 @@
   }
 
   .tab {
-    padding: 0.75rem 1.5rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 0.75rem;
+    padding: 0.5rem 1.25rem;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 0.5rem;
     cursor: pointer;
-    transition: all 0.3s ease;
+    transition: all 0.15s ease;
     color: var(--text-secondary);
     font-weight: 500;
+    font-size: 0.875rem;
   }
 
   .tab.active {
-    background: var(--primary);
-    color: white;
-    border-color: var(--primary);
+    background: var(--primary-light);
+    color: #a5b4fc;
+    border-color: rgba(99, 102, 241, 0.3);
   }
 
   .tab:hover:not(.active) {
-    background: var(--surface-hover);
-    border-color: var(--text-muted);
-  }
-
-  @media (max-width: 768px) {
-    .search-section {
-      padding: 1.5rem;
-    }
-
-    .tabs {
-      flex-wrap: wrap;
-    }
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-primary);
   }
 </style>

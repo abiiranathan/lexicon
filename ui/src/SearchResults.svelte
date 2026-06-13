@@ -1,3 +1,4 @@
+<!-- SearchResults.svelte -->
 <script lang="ts">
   let { query, results, duration, isLoading, error, onResultClick } = $props();
 </script>
@@ -5,88 +6,102 @@
 {#if isLoading}
   <div class="loading">
     <div class="spinner"></div>
-    <span>Searching documents...</span>
+    <span>Searching document database...</span>
   </div>
 {:else if error}
   <div class="error-message">
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+    >
+      <circle cx="12" cy="12" r="10" /><line
+        x1="12"
+        y1="8"
+        x2="12"
+        y2="12"
+      /><line x1="12" y1="16" x2="12.01" y2="16" />
+    </svg>
     <strong>Search failed:</strong>
     {error}
   </div>
 {:else if !query || query.length < 2}
   <div class="empty-state">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+    >
       <circle cx="11" cy="11" r="8"></circle>
       <path d="m21 21-4.35-4.35"></path>
     </svg>
-    <h3>Start your search</h3>
-    <p>Enter keywords to search through your PDF documents</p>
+    <h3>Begin your search</h3>
+    <p>Submit a keyword phrase above to scan the indexed files.</p>
   </div>
 {:else if results && results.results && results.results.length > 0}
   <div class="search-stats">
-    <span>Found {results.count} results in {(duration / 1000).toFixed(0)}s</span
+    <span
+      >Returned {results.count} matches ({(duration / 1000).toFixed(2)}s)</span
     >
   </div>
 
   <div class="results-divider">
-    <span>Individual Search Results</span>
+    <span>Matches</span>
   </div>
 
   <div class="search-results">
     {#each results.results as result}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
+      <button
         class="result-item"
         onclick={() => onResultClick(result)}
-        tabindex="0"
-        role="link"
-        onkeydown={(e: KeyboardEvent) => {
-          if (e.key == "Enter") {
-            onResultClick(result);
-          }
-        }}
+        type="button"
       >
         <div class="result-header">
-          <div class="result-title">{result.file_name || "Unknown File"}</div>
-          <div class="result-meta">
-            <span>Page {result.page_num || "N/A"}</span>
-          </div>
+          <span class="result-title">{result.file_name || "Untitled File"}</span
+          >
+          <span class="result-badge">Page {result.page_num || "N/A"}</span>
         </div>
-        <div class="result-snippet">
+        <p class="result-snippet">
           {@html result.snippet}
-        </div>
+        </p>
         <div class="result-footer">
-          <span>{result.num_pages} page{result.num_pages != 1 ? "s" : ""}</span>
+          <span
+            >{result.num_pages}
+            {result.num_pages === 1 ? "page" : "pages"} total</span
+          >
         </div>
-      </div>
+      </button>
     {/each}
   </div>
 {:else}
   <div class="empty-state">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+    >
       <circle cx="11" cy="11" r="8"></circle>
       <path d="m21 21-4.35-4.35"></path>
     </svg>
-    <h3>No results found</h3>
-    <p>Try different keywords or check your spelling</p>
+    <h3>No matches found</h3>
+    <p>Try refining the query or check for typos.</p>
   </div>
 {/if}
 
 <style>
-  /* Dark theme colors */
-  :global(:root) {
-    --ai-gradient-start: #1e3a5f;
-    --ai-gradient-end: #2d4a6f;
-    --ai-border: #3b82f6;
-    --ai-accent: #60a5fa;
-  }
-
   .loading {
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 3rem;
-    color: var(--text-muted);
+    padding: 5rem 1rem;
+    gap: 1rem;
+    color: var(--text-secondary);
   }
 
   .spinner {
@@ -96,7 +111,6 @@
     border-top-color: var(--primary);
     border-radius: 50%;
     animation: spin 1s linear infinite;
-    margin-right: 1rem;
   }
 
   @keyframes spin {
@@ -107,134 +121,137 @@
 
   .empty-state {
     text-align: center;
-    padding: 3rem;
-    color: var(--text-muted);
+    padding: 5rem 1rem;
+    color: var(--text-secondary);
   }
 
   .empty-state svg {
-    width: 4rem;
-    height: 4rem;
-    margin: 0 auto 1rem;
-    opacity: 0.5;
+    width: 3.5rem;
+    height: 3.5rem;
+    margin: 0 auto 1.25rem;
+    opacity: 0.4;
+    color: var(--text-secondary);
   }
 
   .empty-state h3 {
-    color: var(--text-secondary);
+    color: var(--text-primary);
+    font-size: 1.125rem;
     margin-bottom: 0.5rem;
   }
 
+  .empty-state p {
+    font-size: 0.875rem;
+    max-width: 280px;
+    margin: 0 auto;
+  }
+
   .error-message {
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.3);
+    background: rgba(239, 68, 68, 0.05);
+    border: 1px solid rgba(239, 68, 68, 0.15);
     color: var(--error);
-    padding: 1rem;
+    padding: 1rem 1.25rem;
     border-radius: 0.75rem;
-    margin: 1rem 0;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.875rem;
   }
 
   .search-stats {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
     margin-bottom: 1.5rem;
-    color: var(--text-muted);
-    font-size: 0.875rem;
+    font-weight: 500;
   }
 
   .results-divider {
     display: flex;
     align-items: center;
-    margin: 2rem 0 1.5rem 0;
+    margin: 1.5rem 0;
     color: var(--text-muted);
-    font-size: 0.875rem;
-    font-weight: 500;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
   }
 
-  .results-divider::before,
   .results-divider::after {
     content: "";
     flex: 1;
     height: 1px;
     background: var(--border);
-  }
-
-  .results-divider span {
-    padding: 0 1rem;
+    margin-left: 1rem;
   }
 
   .search-results {
-    display: grid;
-    gap: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.875rem;
   }
 
   .result-item {
-    background: var(--surface);
+    background: rgba(255, 255, 255, 0.02);
     border: 1px solid var(--border);
-    border-radius: 1rem;
-    padding: 1.5rem;
-    transition: all 0.3s ease;
+    border-radius: 0.75rem;
+    padding: 1.25rem;
     cursor: pointer;
+    text-align: left;
+    width: 100%;
+    transition: all 0.2s ease;
   }
 
   .result-item:hover {
-    background: var(--surface-hover);
-    border-color: var(--primary);
-    transform: translateY(-2px);
-    box-shadow: 0 10px 25px -5px rgba(37, 99, 235, 0.15);
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(79, 70, 229, 0.3);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   }
 
   .result-header {
     display: flex;
     justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 0.75rem;
+    align-items: center;
     gap: 1rem;
+    margin-bottom: 0.75rem;
   }
 
   .result-title {
     font-weight: 600;
     color: var(--text-primary);
-    font-size: 1.1rem;
+    font-size: 0.9375rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     flex: 1;
   }
 
-  .result-meta {
-    display: flex;
-    gap: 1rem;
-    font-size: 0.875rem;
-    color: var(--text-muted);
+  .result-badge {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #818cf8;
+    background: rgba(129, 140, 248, 0.1);
+    padding: 0.125rem 0.5rem;
+    border-radius: 0.375rem;
+    white-space: nowrap;
   }
 
   .result-snippet {
     color: var(--text-secondary);
-    line-height: 1.6;
+    font-size: 1.2rem;
+    line-height: 1.5;
     margin-bottom: 0.75rem;
   }
 
   .result-snippet :global(mark) {
-    background: rgba(245, 158, 11, 0.3);
-    color: #fbbf24;
-    padding: 0.125rem 0.25rem;
-    border-radius: 0.25rem;
-    font-weight: 600;
+    background: rgba(245, 158, 11, 0.25);
+    color: #f59e0b;
+    padding: 0 2px;
+    border-radius: 2px;
+    font-weight: 500;
   }
 
   .result-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 0.875rem;
+    font-size: 0.75rem;
     color: var(--text-muted);
-  }
-
-  @media (max-width: 768px) {
-    .result-header {
-      flex-direction: column;
-      align-items: flex-start;
-    }
-
-    .result-meta {
-      margin-top: 0.5rem;
-    }
   }
 </style>

@@ -15,7 +15,7 @@
   import { useLocalStorage } from "./lib/localstorage.svelte";
   import { SvelteURLSearchParams } from "svelte/reactivity";
 
-  const BASE_URL = import.meta.env.BASE_URL;
+  const BASE_URL = import.meta.env.VITE_BASE_PATH;
 
   let currentTab = useLocalStorage("currentTab", "search");
   let searchQuery = useLocalStorage("search-query", "");
@@ -99,7 +99,6 @@
     try {
       const data = await searchAPI(query);
 
-      // Bounded cache avoid excessive memory consumption.
       if (searchCache.size < maxCacheSize) {
         searchCache.set(query, data);
       }
@@ -211,7 +210,6 @@
   }
 
   $effect(() => {
-    // Clean up timeouts on component destroy
     return () => {
       clearTimeout(searchTimeout);
       clearTimeout(fileFilterTimeout);
@@ -222,19 +220,12 @@
 <div class="container">
   <header class="header">
     <div class="logo-section">
-      <a href="/"
-        ><img
-          src="{BASE_URL}/favicon-96x96.png"
-          alt="Logo"
-          width="96"
-          height="96"
-        /></a
-      >
+      <a href="/">
+        <img src="{BASE_URL}/favicon-96x96.png" alt="Logo" class="logo-img" />
+      </a>
       <div class="logo-text">
         <h1><a href="/">Lexicon</a></h1>
-        <p class="tagline">
-          Lightning-fast semantic search across your entire document library
-        </p>
+        <p class="tagline">Semantic Search Engine</p>
       </div>
     </div>
   </header>
@@ -273,7 +264,7 @@
           oninput={handleFileNameFilterInput}
         />
         <div class="limit-selector">
-          <label for="limit-select">Items per page:</label>
+          <label for="limit-select">Show:</label>
           <select
             id="limit-select"
             value={pageLimit}
@@ -282,10 +273,10 @@
                 Number((e.currentTarget as HTMLSelectElement).value),
               )}
           >
-            <option value={10}>10</option>
-            <option value={25}>25</option>
-            <option value={50}>50</option>
-            <option value={100}>100</option>
+            <option value={10}>10 items</option>
+            <option value={25}>25 items</option>
+            <option value={50}>50 items</option>
+            <option value={100}>100 items</option>
           </select>
         </div>
       </div>
@@ -304,15 +295,25 @@
             disabled={!files.has_prev || isLoadingFiles}
             onclick={() => handlePageChange(currentPage - 1)}
           >
-            Previous
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M15 19l-7-7 7-7" />
+            </svg>
+            Prev
           </button>
 
           <div class="pagination-info">
             <span class="page-numbers">
-              Page {files.page} of {Math.ceil(files.total_count / files.limit)}
+              {files.page} / {Math.ceil(files.total_count / files.limit)}
             </span>
             <span class="total-count">
-              ({files.total_count} total files)
+              {files.total_count} files total
             </span>
           </div>
 
@@ -322,6 +323,16 @@
             onclick={() => handlePageChange(currentPage + 1)}
           >
             Next
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M9 5l7 7-7 7" />
+            </svg>
           </button>
         </div>
       {/if}
