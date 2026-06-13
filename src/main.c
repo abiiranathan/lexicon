@@ -84,7 +84,7 @@ void cors(PulsarCtx* ctx) {
 void init_app() {
     // Initialize a fast in-memory cache with 1024 default entries.
     // Default TTL is 2 hours
-    if (!init_response_cache(1024, 2 * 60)) {
+    if (!init_response_cache(128, 2 * 60)) {
         LOG_ERROR("failed to initialize in-memory cache");
         exit(EXIT_FAILURE);
     }

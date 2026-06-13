@@ -224,7 +224,7 @@
     <div class="logo-section">
       <a href="/"
         ><img
-          src="{BASE_URL}favicon-96x96.png"
+          src="{BASE_URL}/favicon-96x96.png"
           alt="Logo"
           width="96"
           height="96"
