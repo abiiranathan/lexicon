@@ -18,7 +18,6 @@ add_executable(${PROJECT_NAME}
     src/main.c 
     src/routes.c 
     src/pdf_indexer.c
-    src/pdf_preprocess.c
     src/database.c
     src/json_response.c
     src/json_allocator.c
@@ -32,9 +31,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     pulsar           # github.com/abiiranathan/pulsar     (Robust epoll-based web server)
     lexicon::pdf     # github.com/abiiranathan/lexicon-pdf     (Robust epoll-based web server)
     yyjson           # https://github.com/ibireme/yyjson  (Json serializer and parser)
-    ${PostgreSQL_LIBRARIES}
-    pcre2-8          # For PDF text preprocessing
     m                # libmath
+    ${PostgreSQL_LIBRARIES}
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

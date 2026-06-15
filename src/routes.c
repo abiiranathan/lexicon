@@ -182,10 +182,6 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     }
     defer {
         pdf_document_close(doc);
-
-        // Let pt_malloc return all freed memory to the system.
-        // Avoid excessive memory usage at cost of performance.
-        malloc_trim(0);
     };
 
     if (page < 1 || page > num_pages) {

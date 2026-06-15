@@ -1,32 +1,19 @@
 /*
- * pdf_indexer.c — multi-process PDF text extractor / PostgreSQL ingester.
+ * pdf_indexer.c — single-threaded synchronous PDF text extractor / PostgreSQL ingester.
  *
- * Architecture
- * ============
- *   1. Walk directory/VFS, collect PDF paths.
- *   2. Register each file in DB, clear old pages, record file_id + page_count.
- *   3. Build a flat FileTask array (one entry per PDF).
- *   4. Fork workers; each worker atomically grabs whole files and processes
- *      all pages in a single document-open / COPY stream.
- *
- * Why file-level work-stealing beats page-chunk work-stealing
- * ===========================================================
- *   With page-chunking, a 600-page PDF is opened/parsed/mmapped N times by
- *   N different workers.  libpdfium's document-open cost is O(pages) and
- *   the mmap fault-in touches every page of the file each time.  Switching
- *   to whole-file tasks means each PDF is opened exactly once, across the
- *   entire run, regardless of its page count.
  */
 #include "../include/pdf_indexer.h"
-#include <fcntl.h>
 #include <lexicon/lexicon_pdf.h>
-#include <libpq-fe.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include <libpq-fe.h> /* PGconn, PQexec, PQexecParams, PQputCopyData, etc. */
 #include <vfs.h>
-#include "../include/pdf_preprocess.h"
+
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
+/* =========================================================================
+ * SQL & Globals
+ * ======================================================================= */
 
 static const char* file_insert_query =
     "INSERT INTO files(name, path, num_pages) "
@@ -37,7 +24,9 @@ static const char* file_insert_query =
 
 extern vfs_t* vfs;
 extern char* conn_info;
+extern pgpool_t* pool;
 
+/** Global cancel flag written by sigint_handler for graceful abort. */
 static volatile sig_atomic_t g_cancel_requested = 0;
 
 static void sigint_handler(int sig) {
@@ -45,16 +34,15 @@ static void sigint_handler(int sig) {
     g_cancel_requested = 1;
 }
 
-#define MAX_PAGE_TEXT_LEN  2047
-#define COPY_ROW_BUF       (MAX_PAGE_TEXT_LEN * 2 + 64)
-#define MAX_FILES_TO_INDEX 4096
+/* =========================================================================
+ * Constants & Types
+ * ======================================================================= */
 
-/*
- * Worker count: PDF extraction is I/O + single-threaded-libpdfium bound,
- * not CPU bound.  More than ~4-6 workers just adds mmap pressure and
- * postgres connection overhead.  Cap at half the online CPUs, min 2, max 8.
- */
-#define MAX_WORKERS 8
+/** Maximum UTF-8 text extracted from a single page (bytes, excluding NUL). */
+#define MAX_PAGE_TEXT_LEN 2047
+
+/** Buffer size for one COPY row: file_id tab page_num tab escaped_text newline. */
+#define COPY_ROW_BUF (MAX_PAGE_TEXT_LEN * 2 + 64)
 
 static const char* const skip_dirs[] = {
     "node_modules", ".git",   ".svn",     ".hg",    "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",    "venv",
@@ -62,77 +50,104 @@ static const char* const skip_dirs[] = {
     ".vscode",      ".cache", "coverage", ".next",  ".nuxt",       ".turbo",        ".DS_Store",   NULL,
 };
 
-/* One task = one whole PDF file. */
-typedef struct {
-    char path[512];
-    int64_t file_id;
-    int num_pages;
-} FileTask;
+/** Processing outcome for a single PDF. */
+typedef enum {
+    OUTCOME_SUCCESS = 0,
+    OUTCOME_DRYRUN = 1,
+    OUTCOME_SKIPPED = 2,
+    OUTCOME_LOAD_ERROR = 3,
+    OUTCOME_OPEN_ERROR = 4,
+    OUTCOME_DB_ERROR = 5,
+    OUTCOME_COUNT = 6, /**< Sentinel — keep last. */
+} OutcomeCode;
 
-typedef struct {
-    volatile int processed_pages; /* updated atomically by workers          */
-    volatile int processed_files; /* ditto                                  */
-    volatile int next_file_index; /* work-stealing cursor                   */
-    int total_pages;              /* set by coordinator, read-only for workers */
-    int file_count;               /* ditto                                  */
-    FileTask tasks[MAX_FILES_TO_INDEX];
-} SharedWork;
+static const char* outcome_to_str(OutcomeCode code) {
+    switch (code) {
+        case OUTCOME_SUCCESS:
+            return "success";
+        case OUTCOME_DRYRUN:
+            return "dry-run";
+        case OUTCOME_SKIPPED:
+            return "skipped";
+        case OUTCOME_LOAD_ERROR:
+            return "load-error";
+        case OUTCOME_OPEN_ERROR:
+            return "open-error";
+        case OUTCOME_DB_ERROR:
+            return "database-error";
+        default:
+            return "unknown";
+    }
+}
 
 /* =========================================================================
- * Zero-Copy File Loader
+ * Reusable File Buffer
  * ======================================================================= */
 
 typedef struct {
     uint8_t* data;
     size_t size;
-    int fd;
-    bool is_mmap;
-} FileBuffer;
+    size_t capacity;
+} ReusableBuffer;
 
-static void file_buffer_release(FileBuffer* buf) {
-    if (buf->is_mmap) {
-        if (buf->data) munmap(buf->data, buf->size);
-        if (buf->fd >= 0) close(buf->fd);
-    } else {
+static void reusable_buffer_free(ReusableBuffer* buf) {
+    if (buf) {
         free(buf->data);
+        buf->data = NULL;
+        buf->size = 0;
+        buf->capacity = 0;
     }
-    *buf = (FileBuffer){.fd = -1};
 }
 
-static bool file_buffer_load(const char* path, FileBuffer* buf) {
-    *buf = (FileBuffer){.fd = -1};
-
+/**
+ * Loads the file at @p path into @p buf, reallocating the internal buffer 
+ * only when the file size exceeds the current capacity.
+ */
+static bool reusable_buffer_load(const char* path, ReusableBuffer* buf) {
     if (vfs != NULL) {
+        /* VFS manages its own memory allocations */
+        free(buf->data);
         buf->data = vfs_read_file(vfs, path, &buf->size);
+        buf->capacity = buf->size;
         return buf->data != NULL;
     }
 
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
 
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
-        close(fd);
-        return false;
+    if (fseek(f, 0, SEEK_END) != 0) goto err_close;
+    long sz = ftell(f);
+    if (sz < 0) goto err_close;
+    if (fseek(f, 0, SEEK_SET) != 0) goto err_close;
+
+    size_t req_size = (size_t)sz;
+    if (req_size > buf->capacity) {
+        size_t new_cap = req_size < 4096 ? 4096 : req_size * 2;
+        uint8_t* new_ptr = realloc(buf->data, new_cap);
+        if (!new_ptr) goto err_close;
+        buf->data = new_ptr;
+        buf->capacity = new_cap;
     }
 
-    buf->size = (size_t)st.st_size;
-    buf->data = mmap(NULL, buf->size, PROT_READ, MAP_SHARED, fd, 0);
-    if (buf->data == MAP_FAILED) {
-        buf->data = NULL;
-        close(fd);
-        return false;
-    }
+    buf->size = req_size;
+    if (buf->size && fread(buf->data, 1, buf->size, f) != buf->size) { goto err_close; }
 
-    buf->fd = fd;
-    buf->is_mmap = true;
+    fclose(f);
     return true;
+
+err_close:
+    fclose(f);
+    return false;
 }
 
 /* =========================================================================
- * COPY row escaping
+ * COPY Row Escaping
  * ======================================================================= */
 
+/**
+ * Escapes @p src into the PostgreSQL text-format COPY representation,
+ * writing at most @p cap - 1 bytes to @p dst and NUL-terminating.
+ */
 static ssize_t copy_escape(const char* src, char* dst, size_t cap) {
     size_t out = 0;
     for (const char* p = src; *p != '\0'; p++) {
@@ -165,36 +180,84 @@ static ssize_t copy_escape(const char* src, char* dst, size_t cap) {
 }
 
 /* =========================================================================
- * Core per-file processor (called once per file per worker)
+ * Synchronous PDF Processor
  * ======================================================================= */
 
-static bool process_file(const FileTask* task, PGconn* conn) {
-    FileBuffer m = {0};
-    if (!file_buffer_load(task->path, &m)) return false;
+/**
+ * Loads, extracts, and ingests a single PDF into the database.
+ * Uses stack-allocated buffers for text operations to minimize heap allocations.
+ *
+ * @param path      Absolute path to the PDF file.
+ * @param min_pages Skip files with fewer than this many pages.
+ * @param dryrun    If true, open the PDF to count pages but do not write to DB.
+ * @param conn      libpq connection (may be NULL when dryrun is true).
+ * @param m         Pointer to the persistent file buffer.
+ * @return Processing outcome code.
+ */
+static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun, PGconn* conn, ReusableBuffer* m) {
+    OutcomeCode outcome = OUTCOME_LOAD_ERROR;
+
+    if (!reusable_buffer_load(path, m)) return OUTCOME_LOAD_ERROR;
 
     pdf_document_t* doc = NULL;
-    if (pdf_document_open_mem(m.data, m.size, NULL, &doc) != PDF_OK) {
-        file_buffer_release(&m);
-        return false;
+    if (pdf_document_open_mem(m->data, m->size, NULL, &doc) != PDF_OK) { return OUTCOME_OPEN_ERROR; }
+
+    int npages = pdf_document_page_count(doc);
+    if (npages <= 0 || npages < min_pages || dryrun) {
+        outcome = dryrun ? OUTCOME_DRYRUN : OUTCOME_SKIPPED;
+        goto out_close;
     }
 
-    PGresult* tx = PQexec(conn, "BEGIN");
-    bool ok = (tx && PQresultStatus(tx) == PGRES_COMMAND_OK);
-    if (tx) PQclear(tx);
-    if (!ok) goto cleanup_doc;
+    PGresult* tx_res = PQexec(conn, "BEGIN");
+    if (!tx_res || PQresultStatus(tx_res) != PGRES_COMMAND_OK) {
+        fprintf(stderr, ">>> Failed to start transaction: %s\n", PQerrorMessage(conn));
+        if (tx_res) PQclear(tx_res);
+        outcome = OUTCOME_DB_ERROR;
+        goto out_close;
+    }
+    PQclear(tx_res);
 
-    PGresult* cr = PQexec(conn, "COPY pages(file_id, page_num, text) FROM STDIN");
-    ok = (cr && PQresultStatus(cr) == PGRES_COPY_IN);
-    if (cr) PQclear(cr);
-    if (!ok) {
-        PQexec(conn, "ROLLBACK");
-        goto cleanup_doc;
+    const char* name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+
+    char npages_str[16];
+    snprintf(npages_str, sizeof(npages_str), "%d", npages);
+    const char* params[] = {name, path, npages_str};
+
+    int64_t fid = -1;
+    PGresult* res = PQexecParams(conn, file_insert_query, 3, NULL, params, NULL, NULL, 0);
+    if (res && PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+        fid = atoll(PQgetvalue(res, 0, 0));
+    } else {
+        fprintf(stderr, ">>> file insert failed for '%s': %s\n", name, PQerrorMessage(conn));
+    }
+    PQclear(res);
+
+    if (fid < 0) {
+        PGresult* roll_res = PQexec(conn, "ROLLBACK");
+        PQclear(roll_res);
+        outcome = OUTCOME_DB_ERROR;
+        goto out_close;
     }
 
-    char row[COPY_ROW_BUF];
-    char escaped[MAX_PAGE_TEXT_LEN * 2 + 4];
+    /* Initiate COPY FROM STDIN */
+    PGresult* copy_res = PQexec(conn, "COPY pages(file_id, page_num, text) FROM STDIN (ON_ERROR ignore);");
+    if (!copy_res || PQresultStatus(copy_res) != PGRES_COPY_IN) {
+        fprintf(stderr, ">>> COPY start failed for '%s': %s\n", name, PQerrorMessage(conn));
+        if (copy_res) PQclear(copy_res);
+        PGresult* roll_res = PQexec(conn, "ROLLBACK");
+        PQclear(roll_res);
+        outcome = OUTCOME_DB_ERROR;
+        goto out_close;
+    }
+    PQclear(copy_res);
 
-    for (int i = 0; i < task->num_pages && ok; i++) {
+    char row[COPY_ROW_BUF] = {0};
+    char escaped[MAX_PAGE_TEXT_LEN * 2 + 4] = {0};
+    char raw_buf[MAX_PAGE_TEXT_LEN + 1] = {0};
+    bool copy_ok = true;
+
+    for (int i = 0; i < npages && copy_ok; i++) {
         pdf_page_t* page = NULL;
         if (pdf_page_open(doc, i, &page) != PDF_OK) continue;
 
@@ -204,84 +267,108 @@ static bool process_file(const FileTask* task, PGconn* conn) {
             continue;
         }
 
-        char* raw = NULL;
-        if (pdf_text_utf8(th, &raw) == PDF_OK && raw) {
-            size_t len = strlen(raw);
-            if (len >= MAX_PAGE_TEXT_LEN) {
-                raw[MAX_PAGE_TEXT_LEN - 1] = '\0';
-                len = MAX_PAGE_TEXT_LEN - 1;
-            }
+        size_t written = 0;
+        /* Read directly into stack buffer instead of allocating */
+        if (pdf_text_utf8_buf(th, raw_buf, sizeof(raw_buf) - 1, &written) == PDF_OK && written > 0) {
+            raw_buf[written] = '\0';
 
-            char* cleaned = pdf_text_clean(raw, len, true);
-            if (copy_escape(cleaned, escaped, sizeof(escaped)) >= 0) {
-                int n = snprintf(row, sizeof(row), "%" PRId64 "\t%d\t%s\n", task->file_id, i + 1, escaped);
-                if (n > 0 && (size_t)n < sizeof(row)) {
-                    if (PQputCopyData(conn, row, n) != 1) ok = false;
+            if (copy_escape(raw_buf, escaped, sizeof(escaped)) >= 0) {
+                int n = snprintf(row, sizeof(row), "%" PRId64 "\t%d\t%s\n", fid, i + 1, escaped);
+                if (n > 0 && (size_t)n < sizeof(row) && PQputCopyData(conn, row, n) != 1) {
+                    fprintf(stderr, ">>> PQputCopyData failed: %s\n", PQerrorMessage(conn));
+                    copy_ok = false;
                 }
             }
-            if (cleaned != raw) free(cleaned);
-            free(raw);
         }
 
         pdf_text_close(th);
         pdf_page_close(page);
     }
 
-    if (!ok) {
+    if (!copy_ok) {
         PQputCopyEnd(conn, "client error during page extraction");
     } else if (PQputCopyEnd(conn, NULL) != 1) {
-        ok = false;
+        fprintf(stderr, ">>> PQputCopyEnd failed: %s\n", PQerrorMessage(conn));
+        copy_ok = false;
     }
 
     PGresult* fin;
     while ((fin = PQgetResult(conn)) != NULL) {
-        if (ok && PQresultStatus(fin) != PGRES_COMMAND_OK) ok = false;
+        if (copy_ok && PQresultStatus(fin) != PGRES_COMMAND_OK) {
+            fprintf(stderr, ">>> COPY finalise failed for '%s': %s\n", name, PQresultErrorMessage(fin));
+            copy_ok = false;
+        }
         PQclear(fin);
     }
 
-    if (ok) {
-        PGresult* c = PQexec(conn, "COMMIT");
-        if (!c || PQresultStatus(c) != PGRES_COMMAND_OK) ok = false;
-        if (c) PQclear(c);
+    if (copy_ok) {
+        PGresult* commit_res = PQexec(conn, "COMMIT");
+        if (!commit_res || PQresultStatus(commit_res) != PGRES_COMMAND_OK) {
+            fprintf(stderr, ">>> COMMIT failed: %s\n", PQerrorMessage(conn));
+            copy_ok = false;
+        }
+        if (commit_res) { PQclear(commit_res); }
     } else {
-        PQexec(conn, "ROLLBACK");
+        PGresult* roll_res = PQexec(conn, "ROLLBACK");
+        PQclear(roll_res);
     }
 
-cleanup_doc:
+    outcome = copy_ok ? OUTCOME_SUCCESS : OUTCOME_DB_ERROR;
+
+out_close:
     pdf_document_close(doc);
-    file_buffer_release(&m); /* mmap released immediately after close — peak RSS ~= largest single PDF */
-    return ok;
+    return outcome;
 }
 
 /* =========================================================================
- * Path Collection
+ * Walker State and Callbacks
  * ======================================================================= */
 
 typedef struct {
-    char* paths[MAX_FILES_TO_INDEX];
-    int count;
-} PathList;
+    int processed_count;
+    int min_pages;
+    bool dryrun;
+    PGconn* conn;
+    int outcome_counts[OUTCOME_COUNT];
+    ReusableBuffer file_buf;
+} IndexerState;
 
-static bool collect_vfs_file(const char* path, const vfs_stat_t* st, void* userdata) {
+static void record_outcome(IndexerState* is, const char* path, OutcomeCode outcome) {
+    is->processed_count++;
+    is->outcome_counts[(int)outcome]++;
+
+    const char* base = strrchr(path, '/');
+    printf(">>> [%d] %s — %s\n", is->processed_count, base ? base + 1 : path, outcome_to_str(outcome));
+    fflush(stdout);
+}
+
+static bool process_vfs_file(const char* path, const vfs_stat_t* st, void* userdata) {
     (void)st;
-    PathList* pl = (PathList*)userdata;
-    if (pl->count >= MAX_FILES_TO_INDEX) return false;
+    IndexerState* is = (IndexerState*)userdata;
+    if (g_cancel_requested) return false;
+
     const char* ext = strrchr(path, '.');
     if (!ext || ext == path || strcasecmp(ext + 1, "pdf") != 0) return true;
-    pl->paths[pl->count++] = strdup(path);
+
+    OutcomeCode outcome = process_one_pdf(path, is->min_pages, is->dryrun, is->conn, &is->file_buf);
+    record_outcome(is, path, outcome);
     return true;
 }
 
-static WalkDirOption collect_host_file(const FileAttributes* attr, const char* path, const char* name, void* userdata) {
+static WalkDirOption process_host_file(const FileAttributes* attr, const char* path, const char* name, void* userdata) {
     (void)attr;
-    PathList* pl = (PathList*)userdata;
-    if (pl->count >= MAX_FILES_TO_INDEX) return DirStop;
+    IndexerState* is = (IndexerState*)userdata;
+    if (g_cancel_requested) return DirStop;
+
     for (size_t i = 0; skip_dirs[i] != NULL; i++) {
         if (strcmp(name, skip_dirs[i]) == 0) return DirSkip;
     }
+
     const char* ext = strrchr(name, '.');
     if (!ext || ext == name || strcasecmp(ext + 1, "pdf") != 0) return DirContinue;
-    pl->paths[pl->count++] = strdup(path);
+
+    OutcomeCode outcome = process_one_pdf(path, is->min_pages, is->dryrun, is->conn, &is->file_buf);
+    record_outcome(is, path, outcome);
     return DirContinue;
 }
 
@@ -300,177 +387,53 @@ bool process_pdfs(const char* root_dir, int min_pages, bool dryrun) {
         sigaction(SIGTERM, &old_term, NULL);
     };
 
-    /* 1. Collect paths */
-    PathList pl = {0};
-    if (vfs != NULL) {
-        vfs_list(vfs, NULL, collect_vfs_file, &pl);
-    } else {
-        dir_walk(root_dir, collect_host_file, &pl);
-    }
-    if (pl.count == 0) {
-        printf(">>> No PDFs found to index.\n");
-        return true;
-    }
+    PGconn* raw_conn = PQconnectdb(conn_info);
+    if (!raw_conn) return false;
 
-    /* Shared work queue in anonymous mmap — visible across fork() */
-    SharedWork* work = mmap(NULL, sizeof(SharedWork), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (work == MAP_FAILED) {
-        fprintf(stderr, ">>> Failed to allocate shared work memory\n");
+    if (PQstatus(raw_conn) != CONNECTION_OK) {
+        fprintf(stderr, "pgpool: connection failed: %s", PQerrorMessage(raw_conn));
+        PQfinish(raw_conn);
         return false;
     }
-    memset(work, 0, sizeof(SharedWork));
+    defer {
+        PQfinish(raw_conn);
+    };
 
-    /* 2. Register files & build task list (coordinator, single connection) */
-    pgconn_t* coord_conn = NULL;
-    PGconn* raw_conn = NULL;
     if (!dryrun) {
-        coord_conn = pgpool_acquire(pool, 10000);
-        if (!coord_conn) {
-            fprintf(stderr, ">>> Failed to acquire coordinator DB connection\n");
-            munmap(work, sizeof(SharedWork));
-            return false;
-        }
-        raw_conn = pgpool_get_raw_connection(coord_conn);
+        PGresult* sync_res = PQexec(raw_conn, "SET synchronous_commit = off");
+        if (sync_res) { PQclear(sync_res); }
     }
 
-    pdf_library_init();
-    printf(">>> Registering %d files...\n", pl.count);
-    fflush(stdout);
+    IndexerState is = {.processed_count = 0,
+                       .min_pages = min_pages,
+                       .dryrun = dryrun,
+                       .conn = raw_conn,
+                       .outcome_counts = {0},
+                       .file_buf = {0}};
 
-    for (int i = 0; i < pl.count; i++) {
-        FileBuffer m = {0};
-        if (!file_buffer_load(pl.paths[i], &m)) continue;
-
-        pdf_document_t* doc = NULL;
-        if (pdf_document_open_mem(m.data, m.size, NULL, &doc) != PDF_OK) {
-            file_buffer_release(&m);
-            continue;
-        }
-
-        int npages = pdf_document_page_count(doc);
-        pdf_document_close(doc);
-        file_buffer_release(&m);
-
-        if (npages < min_pages) continue;
-
-        int64_t fid = -1;
-        if (!dryrun) {
-            const char* name = strrchr(pl.paths[i], '/');
-            name = name ? name + 1 : pl.paths[i];
-
-            char npages_str[16];
-            snprintf(npages_str, sizeof(npages_str), "%d", npages);
-            const char* params[] = {name, pl.paths[i], npages_str};
-
-            PGresult* res = PQexecParams(raw_conn, file_insert_query, 3, NULL, params, NULL, NULL, 0);
-            if (res && PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
-                fid = atoll(PQgetvalue(res, 0, 0));
-            }
-            if (res) PQclear(res);
-
-            if (fid >= 0) {
-                char fid_str[24];
-                snprintf(fid_str, sizeof(fid_str), "%" PRId64, fid);
-                const char* dp[] = {fid_str};
-                PGresult* dr = PQexecParams(raw_conn, "DELETE FROM pages WHERE file_id = $1", 1, NULL, dp, NULL, NULL,
-                                            0);
-                if (dr) PQclear(dr);
-            }
-        }
-
-        if (work->file_count < MAX_FILES_TO_INDEX) {
-            FileTask* t = &work->tasks[work->file_count++];
-            strncpy(t->path, pl.paths[i], sizeof(t->path) - 1);
-            t->file_id = fid;
-            t->num_pages = npages;
-            work->total_pages += npages;
-        }
+    if (vfs != NULL) {
+        if (dryrun) printf("Performing VFS index dry run\n");
+        vfs_list(vfs, NULL, process_vfs_file, &is);
+    } else {
+        if (dryrun) printf("Performing host index dry run on %s\n", root_dir);
+        dir_walk(root_dir, process_host_file, &is);
     }
 
-    if (coord_conn) pgpool_release(pool, coord_conn);
-    pdf_library_destroy();
+    /* Free the persistent file buffer once processing is fully completed */
+    reusable_buffer_free(&is.file_buf);
 
-    if (work->file_count == 0) {
-        printf(">>> No qualifying PDFs after filtering.\n");
-        munmap(work, sizeof(SharedWork));
-        for (int i = 0; i < pl.count; i++)
-            free(pl.paths[i]);
-        return true;
-    }
-
-    /*
-     * 3. Determine worker count.
-     *
-     * PDF extraction is I/O + libpdfium-parse bound, not CPU bound.
-     * Empirically, 4–6 workers saturates a local SSD without excessive
-     * memory pressure.  Cap at min(MAX_WORKERS, half online CPUs, file_count).
-     */
-    int num_workers = 4;
-#if defined(_SC_NPROCESSORS_ONLN)
-    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
-    if (nprocs > 1) num_workers = (int)(nprocs / 2);
+#if defined(__GLIBC__)
+    /* Trim once at the end of processing instead of per file to minimize system overhead */
+    malloc_trim(0);
 #endif
-    if (num_workers > MAX_WORKERS) num_workers = MAX_WORKERS;
-    if (num_workers > work->file_count) num_workers = work->file_count;
-    if (num_workers < 1) num_workers = 1;
-
-    printf(">>> Processing %d files (%d pages) with %d workers...\n", work->file_count, work->total_pages, num_workers);
-    fflush(stdout);
-
-    /* 4. Fork */
-    for (int w = 0; w < num_workers; w++) {
-        pid_t pid = fork();
-        if (pid < 0) {
-            fprintf(stderr, ">>> fork failed for worker %d\n", w);
-            continue;
-        }
-
-        if (pid == 0) { /* ---- child ---- */
-            pdf_library_init();
-
-            PGconn* conn = NULL;
-            if (!dryrun) {
-                conn = PQconnectdb(conn_info);
-                if (PQstatus(conn) != CONNECTION_OK) {
-                    pdf_library_destroy();
-                    _exit(1);
-                }
-                PGresult* s = PQexec(conn, "SET synchronous_commit = off");
-                if (s) PQclear(s);
-            }
-
-            int idx;
-            while (!g_cancel_requested && (idx = __sync_fetch_and_add(&work->next_file_index, 1)) < work->file_count) {
-                const FileTask* task = &work->tasks[idx];
-                bool ok = process_file(task, conn);
-
-                int pages_done = __sync_fetch_and_add(&work->processed_pages, task->num_pages) + task->num_pages;
-                int files_done = __sync_fetch_and_add(&work->processed_files, 1) + 1;
-
-                const char* base = strrchr(task->path, '/');
-                printf(">>> [%d/%d files | %d/%d pages] %s — %s\n", files_done, work->file_count, pages_done,
-                       work->total_pages, base ? base + 1 : task->path, ok ? "ok" : "FAILED");
-                fflush(stdout);
-            }
-
-            if (conn) PQfinish(conn);
-            pdf_library_destroy();
-            _exit(0);
-        }
-    }
-
-    /* 5. Wait */
-    int status;
-    while (wait(&status) > 0)
-        ;
 
     bool cancelled = g_cancel_requested;
-    printf(">>> Indexing complete: %d/%d pages processed%s\n", work->processed_pages, work->total_pages,
-           cancelled ? " (interrupted)" : "");
-
-    for (int i = 0; i < pl.count; i++)
-        free(pl.paths[i]);
-    munmap(work, sizeof(SharedWork));
+    printf(">>> Indexing complete: %d PDFs processed%s\n", is.processed_count, cancelled ? " (interrupted)" : "");
+    printf(
+        ">>> Outcomes — success:%-5d dry-run:%-5d "
+        "load-err:%-5d open-err:%-5d db-err:%-5d\n",
+        is.outcome_counts[OUTCOME_SUCCESS], is.outcome_counts[OUTCOME_DRYRUN], is.outcome_counts[OUTCOME_LOAD_ERROR],
+        is.outcome_counts[OUTCOME_OPEN_ERROR], is.outcome_counts[OUTCOME_DB_ERROR]);
 
     return !cancelled;
 }
