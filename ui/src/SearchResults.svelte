@@ -288,7 +288,7 @@
   .result-title {
     font-weight: 600;
     color: var(--text-primary);
-    font-size: 0.9375rem;
+    font-size: 1.2rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -310,7 +310,7 @@
 
   .result-snippet {
     color: var(--text-secondary);
-    font-size: 0.875rem;
+    font-size: 1rem;
     line-height: 1.6;
     margin-bottom: 0.75rem;
     display: -webkit-box;
@@ -323,7 +323,7 @@
   .result-snippet :global(mark) {
     background: rgba(245, 158, 11, 0.2);
     color: #f59e0b;
-    padding: 0 2px;
+    padding: 2px;
     border-radius: 2px;
     font-weight: 500;
   }

@@ -259,7 +259,7 @@
       </a>
       <div class="logo-text">
         <h1><a href="/">Lexicon</a></h1>
-        <p class="tagline">Semantic Search Engine</p>
+        <p class="tagline">PDF Semantic Search Engine</p>
       </div>
     </div>
 
