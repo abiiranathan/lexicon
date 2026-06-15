@@ -39,28 +39,25 @@ extern vfs_t* vfs;  // Instance of VFS defined in main.c.
  *
  * @param path       Path to the file.
  * @param num_pages  Receives the page count on success.
- * @return           Opaque PDF document handle, or NULL on failure.
+ * @return           true on success.
  */
-pdf_document_t* gen_open_document(const char* path, int* num_pages) {
-    pdf_document_t* doc = NULL;
+bool gen_open_document(pdf_document_t* doc, const char* path, int* num_pages) {
     pdf_status_t status = PDF_OK;
-
     if (vfs != NULL) {
         size_t size = 0;
         void* data = vfs_read_file(vfs, path, &size);
         if (!data) return NULL;
-
-        status = pdf_document_open_mem(data, size, NULL, &doc);
+        status = pdf_document_open_mem(doc, data, size, NULL);
         free(data); /* Copied internally by PDFium */
     } else {
-        status = pdf_document_open(path, NULL, &doc);
+        status = pdf_document_open(doc, path, NULL);
     }
 
-    if (status == PDF_OK && doc) {
+    if (status == PDF_OK) {
         *num_pages = pdf_document_page_count(doc);
-        return doc;
+        return true;
     }
-    return NULL;
+    return false;
 }
 
 /**
@@ -175,13 +172,14 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     const char* path = PQgetvalue(res, 0, 0);
 
     int num_pages = 0;
-    pdf_document_t* doc = gen_open_document(path, &num_pages);
-    if (!doc) {
-        send_json_error(conn, "Failed to open document");
+    pdf_document_t doc = {0};
+    if (!gen_open_document(&doc, path, &num_pages)) {
+        send_json_error(conn, "Failed to open PDF document");
         return;
     }
+
     defer {
-        pdf_document_close(doc);
+        pdf_document_close(&doc);
     };
 
     if (page < 1 || page > num_pages) {
@@ -189,17 +187,17 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
         return;
     }
 
-    pdf_page_t* ppage = NULL;
-    if (pdf_page_open(doc, page - 1, &ppage) != PDF_OK) {
+    pdf_page_t ppage = {0};
+    if (pdf_page_open(&doc, page - 1, &ppage) != PDF_OK) {
         send_json_error(conn, "Error getting page from PDF");
         return;
     }
     defer {
-        pdf_page_close(ppage);
+        pdf_page_close(&ppage);
     };
 
     pdf_bitmap_t bmp = {0};
-    if (pdf_page_render(ppage, scale, &bmp) != PDF_OK) {
+    if (pdf_page_render(&ppage, scale, &bmp) != PDF_OK) {
         send_json_error(conn, "Failed to render PDF page");
         return;
     }

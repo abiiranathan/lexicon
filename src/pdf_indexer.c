@@ -199,10 +199,10 @@ static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun,
 
     if (!reusable_buffer_load(path, m)) return OUTCOME_LOAD_ERROR;
 
-    pdf_document_t* doc = NULL;
-    if (pdf_document_open_mem(m->data, m->size, NULL, &doc) != PDF_OK) { return OUTCOME_OPEN_ERROR; }
+    pdf_document_t doc = {0};
+    if (pdf_document_open_mem(&doc, m->data, m->size, NULL) != PDF_OK) { return OUTCOME_OPEN_ERROR; }
 
-    int npages = pdf_document_page_count(doc);
+    int npages = pdf_document_page_count(&doc);
     if (npages <= 0 || npages < min_pages || dryrun) {
         outcome = dryrun ? OUTCOME_DRYRUN : OUTCOME_SKIPPED;
         goto out_close;
@@ -258,12 +258,12 @@ static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun,
     bool copy_ok = true;
 
     for (int i = 0; i < npages && copy_ok; i++) {
-        pdf_page_t* page = NULL;
-        if (pdf_page_open(doc, i, &page) != PDF_OK) continue;
+        pdf_page_t page = {0};
+        if (pdf_page_open(&doc, i, &page) != PDF_OK) continue;
 
         pdf_text_t* th = NULL;
-        if (pdf_text_open(page, &th) != PDF_OK) {
-            pdf_page_close(page);
+        if (pdf_text_open(&page, &th) != PDF_OK) {
+            pdf_page_close(&page);
             continue;
         }
 
@@ -282,7 +282,7 @@ static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun,
         }
 
         pdf_text_close(th);
-        pdf_page_close(page);
+        pdf_page_close(&page);
     }
 
     if (!copy_ok) {
@@ -316,7 +316,7 @@ static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun,
     outcome = copy_ok ? OUTCOME_SUCCESS : OUTCOME_DB_ERROR;
 
 out_close:
-    pdf_document_close(doc);
+    pdf_document_close(&doc);
     return outcome;
 }
 
