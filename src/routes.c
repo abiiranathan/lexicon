@@ -47,8 +47,8 @@ bool gen_open_document(pdf_document_t* doc, const char* path, int* num_pages) {
         size_t size = 0;
         void* data = vfs_read_file(vfs, path, &size);
         if (!data) return NULL;
+        // takes ownership of the data.
         status = pdf_document_open_mem(doc, data, size, NULL);
-        free(data); /* Copied internally by PDFium */
     } else {
         status = pdf_document_open(doc, path, NULL);
     }
@@ -170,16 +170,18 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     handle_record_not_found(res, conn, "No file found for the requested file");
 
     const char* path = PQgetvalue(res, 0, 0);
+    printf("Serving page %d of file: %s\n", page, path);
 
     int num_pages = 0;
-    pdf_document_t doc = {0};
-    if (!gen_open_document(&doc, path, &num_pages)) {
+    pdf_document_t doc_var = {0};
+    pdf_document_t* doc = &doc_var;
+    if (!gen_open_document(doc, path, &num_pages)) {
         send_json_error(conn, "Failed to open PDF document");
         return;
     }
 
     defer {
-        pdf_document_close(&doc);
+        pdf_document_close(doc);
     };
 
     if (page < 1 || page > num_pages) {
@@ -187,8 +189,9 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
         return;
     }
 
+    printf("Opening PDF page\n");
     pdf_page_t ppage = {0};
-    if (pdf_page_open(&doc, page - 1, &ppage) != PDF_OK) {
+    if (pdf_page_open(doc, page - 1, &ppage) != PDF_OK) {
         send_json_error(conn, "Error getting page from PDF");
         return;
     }
