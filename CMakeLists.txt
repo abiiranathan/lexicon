@@ -10,13 +10,7 @@ set(SERVER_WORKERS "2" CACHE STRING "Number of server worker threads")
 
 find_package(PkgConfig REQUIRED)
 find_package(PostgreSQL REQUIRED)
-find_package(JPEG REQUIRED)
-
-message(STATUS "JPEG library: ${JPEG_LIBRARIES}")
-message(STATUS "JPEG include: ${JPEG_INCLUDE_DIRS}")
-
-# This should pull in most dependencies automatically
-pkg_check_modules(POPPLER_GLIB REQUIRED poppler-glib)
+find_package(lexicon-pdf REQUIRED)
 
 # The executable needs ./ui/dist svelte frontend served at / route.
 # Build with: `cd ui` && `npm run build`
@@ -24,7 +18,6 @@ add_executable(${PROJECT_NAME}
     src/main.c 
     src/routes.c 
     src/pdf_indexer.c
-    src/pdf.c 
     src/pdf_preprocess.c
     src/database.c
     src/json_response.c
@@ -33,22 +26,18 @@ add_executable(${PROJECT_NAME}
 
 # All dependencies from abiiranathan can be built from source with cmake
 target_link_libraries(${PROJECT_NAME} PRIVATE 
-    pgpool # github.com/abiiranathan/pgpool     (libpq connection pool library)
-    solidc # github.com/abiiranathan/solidc     (Cross-platform C utilities and DS)
-    vfs # github.com/abiiranathan/vfs          (Virtual File System)
-    pulsar # github.com/abiiranathan/pulsar     (Robust epoll-based web server)
-    yyjson # https://github.com/ibireme/yyjson  (Json serializer and parser)
-    m      # math library
-    z      # zlib
-    ${POPPLER_GLIB_LIBRARIES}
+    pgpool           # github.com/abiiranathan/pgpool     (libpq connection pool library)
+    solidc           # github.com/abiiranathan/solidc     (Cross-platform C utilities and DS)
+    vfs              # github.com/abiiranathan/vfs          (Virtual File System)
+    pulsar           # github.com/abiiranathan/pulsar     (Robust epoll-based web server)
+    lexicon::pdf     # github.com/abiiranathan/lexicon-pdf     (Robust epoll-based web server)
+    yyjson           # https://github.com/ibireme/yyjson  (Json serializer and parser)
     ${PostgreSQL_LIBRARIES}
-    JPEG::JPEG
-    gio-2.0
-    pcre2-8
+    pcre2-8          # For PDF text preprocessing
+    m                # libmath
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
-    ${POPPLER_GLIB_INCLUDE_DIRS}
     ${PostgreSQL_INCLUDE_DIRS}
 )
 

@@ -1,3 +1,4 @@
+#include <lexicon/lexicon_pdf.h>
 #include <malloc.h>
 #include <pulsar/error.h>
 #include <solidc/defer.h>
@@ -6,7 +7,6 @@
 
 #include "../include/database.h"
 #include "../include/json_response.h"
-#include "../include/pdf.h"
 #include "../include/routes.h"
 
 extern vfs_t* vfs;  // Instance of VFS defined in main.c.
@@ -34,10 +34,33 @@ extern vfs_t* vfs;  // Instance of VFS defined in main.c.
         return;                                          \
     }
 
-// Opens a document from the VFS if one exists otherwise uses default filesystem.
-PopplerDocument* gen_open_document(const char* path, int* num_pages) {
-    if (vfs != NULL) { return open_vfs_document(vfs, path, num_pages); }
-    return open_document(path, num_pages);
+/**
+ * Opens a document from the VFS if one exists, otherwise uses the host filesystem.
+ *
+ * @param path       Path to the file.
+ * @param num_pages  Receives the page count on success.
+ * @return           Opaque PDF document handle, or NULL on failure.
+ */
+pdf_document_t* gen_open_document(const char* path, int* num_pages) {
+    pdf_document_t* doc = NULL;
+    pdf_status_t status = PDF_OK;
+
+    if (vfs != NULL) {
+        size_t size = 0;
+        void* data = vfs_read_file(vfs, path, &size);
+        if (!data) return NULL;
+
+        status = pdf_document_open_mem(data, size, NULL, &doc);
+        free(data); /* Copied internally by PDFium */
+    } else {
+        status = pdf_document_open(path, NULL, &doc);
+    }
+
+    if (status == PDF_OK && doc) {
+        *num_pages = pdf_document_page_count(doc);
+        return doc;
+    }
+    return NULL;
 }
 
 /**
@@ -105,7 +128,10 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
 /**
  * GET /files/:file_id/pages/:page_num/render
  *
- * Renders a single PDF page as a PNG image.
+ * Renders a single PDF page to an in-memory compressed image and streams it.
+ * Optional query parameters:
+ *   - scale: float scaling factor (default: 2.0)
+ *   - type: format type, "png" or "jpg" (default: "jpg")
  */
 void render_pdfpage_as_image(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
@@ -124,6 +150,18 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
         return;
     }
 
+    /* Extract scale and type from query options */
+    float scale = 2.0f;
+    const char* scale_str = query_get(conn, "scale");
+    if (scale_str) {
+        char* endptr = NULL;
+        float parsed = strtof(scale_str, &endptr);
+        if (endptr != scale_str && parsed > 0.0f) { scale = parsed; }
+    }
+
+    const char* type_str = query_get(conn, "type");
+    bool is_png = (type_str && strcasecmp(type_str, "png") == 0);
+
     static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
     const char* params[] = {file_id_str};
 
@@ -137,15 +175,15 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     const char* path = PQgetvalue(res, 0, 0);
 
     int num_pages = 0;
-    PopplerDocument* doc = gen_open_document(path, &num_pages);
+    pdf_document_t* doc = gen_open_document(path, &num_pages);
     if (!doc) {
         send_json_error(conn, "Failed to open document");
         return;
     }
     defer {
-        g_object_unref(doc);
+        pdf_document_close(doc);
 
-        // let pt_malloc return all freed memory.
+        // Let pt_malloc return all freed memory to the system.
         // Avoid excessive memory usage at cost of performance.
         malloc_trim(0);
     };
@@ -155,28 +193,41 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
         return;
     }
 
-    PopplerPage* ppage = poppler_document_get_page(doc, page - 1);
-    if (!ppage) {
+    pdf_page_t* ppage = NULL;
+    if (pdf_page_open(doc, page - 1, &ppage) != PDF_OK) {
         send_json_error(conn, "Error getting page from PDF");
         return;
     }
     defer {
-        g_object_unref(ppage);
+        pdf_page_close(ppage);
     };
 
-    pdf_buffer_t buf = {0};
-    double width, height;
-    poppler_page_get_size(ppage, &width, &height);
-
-    if (render_page_to_png_buffer(ppage, (int)width, (int)height, &buf)) {
-        static const char headers[] = "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n";
-        size_t length = sizeof(headers) - 1;
-        conn_writeheader_raw(conn, headers, length);
-        conn_write(conn, buf.data, buf.size);
-        free(buf.data);
+    pdf_bitmap_t bmp = {0};
+    if (pdf_page_render(ppage, scale, &bmp) != PDF_OK) {
+        send_json_error(conn, "Failed to render PDF page");
         return;
     }
-    send_json_error(conn, "Internal Server Error");
+    defer {
+        pdf_bitmap_free(&bmp);
+    };
+
+    uint8_t* img_data = NULL;
+    size_t img_size = 0;
+    pdf_image_format_t format = is_png ? PDF_IMAGE_PNG : PDF_IMAGE_JPEG;
+
+    /* Encode the rendered bitmap in-memory, avoiding all disk I/O */
+    pdf_status_t est = pdf_bitmap_encode(&bmp, format, 88, &img_data, &img_size);
+    if (est != PDF_OK || !img_data) {
+        send_json_error(conn, "Failed to encode rendered image in memory");
+        return;
+    }
+
+    char headers[128];
+    snprintf(headers, sizeof(headers), "Content-Type: %s\r\nCache-Control: public, max-age=3600\r\n",
+             is_png ? "image/png" : "image/jpeg");
+    conn_writeheader_raw(conn, headers, strlen(headers));
+    conn_write(conn, img_data, img_size);
+    free(img_data);
 }
 
 /**

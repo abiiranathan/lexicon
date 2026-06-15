@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import SearchSection from "./SearchSection.svelte";
   import SearchResults from "./SearchResults.svelte";
   import FilesList from "./FilesList.svelte";
@@ -17,13 +17,27 @@
 
   const BASE_URL = import.meta.env.VITE_BASE_PATH;
 
+  const DEFAULT_RENDER: RenderParams = { format: "jpg", scale: 1.5 };
+
   let currentTab = useLocalStorage("currentTab", "search");
   let searchQuery = useLocalStorage("search-query", "");
   let fileNameFilter = useLocalStorage("file-name-filter", "");
+  // Persist render preferences across sessions.
+  let savedFormat = useLocalStorage<RenderFormat>(
+    "render-format",
+    DEFAULT_RENDER.format,
+  );
+  let savedScale = useLocalStorage<number>(
+    "render-scale",
+    DEFAULT_RENDER.scale,
+  );
 
-  let searchResults = $state<{ results: SearchResult[] }>({
-    results: [],
+  let renderParams = $state<RenderParams>({
+    format: savedFormat.value,
+    scale: savedScale.value,
   });
+
+  let searchResults = $state<{ results: SearchResult[] }>({ results: [] });
 
   let files = $state<FileListResult>({
     results: [],
@@ -55,8 +69,8 @@
     loadFiles(currentPage, pageLimit);
     handleSearch(searchQuery.value);
 
-    let fileIdString = params.get("file");
-    let pageString = params.get("page");
+    const fileIdString = params.get("file");
+    const pageString = params.get("page");
     if (fileIdString && pageString) {
       resetModalState(parseInt(fileIdString), parseInt(pageString));
     }
@@ -64,7 +78,6 @@
 
   async function resetModalState(fileId: number, page: number) {
     if (!fileId || !page) return;
-
     try {
       const file = await getFileByID(fileId);
       viewPage(fileId, page, file.num_pages, file.name);
@@ -76,6 +89,7 @@
         page: 0,
         file_id: fileId,
         filename: "",
+        renderParams: { ...renderParams },
       };
     }
   }
@@ -98,7 +112,6 @@
     const start = performance.now();
     try {
       const data = await searchAPI(query);
-
       if (searchCache.size < maxCacheSize) {
         searchCache.set(query, data);
       }
@@ -119,17 +132,11 @@
     isLoadingFiles = true;
     filesError = null;
 
-    const params: FileSearchParams = {
-      page,
-      limit,
-    };
-
-    if (nameFilter && nameFilter.trim().length > 0) {
-      params.name = nameFilter.trim();
-    }
+    const p: FileSearchParams = { page, limit };
+    if (nameFilter?.trim()) p.name = nameFilter.trim();
 
     try {
-      files = await loadAllFiles(params);
+      files = await loadAllFiles(p);
       currentPage = page;
       pageLimit = limit;
     } catch (error: unknown) {
@@ -141,9 +148,7 @@
 
   function handleSearchSubmit() {
     clearTimeout(searchTimeout);
-    if (searchQuery.value) {
-      handleSearch(searchQuery.value);
-    }
+    if (searchQuery.value) handleSearch(searchQuery.value);
   }
 
   function handleFileNameFilterInput(
@@ -176,15 +181,15 @@
     fileName: string,
   ) {
     try {
-      const blob = await fetchPage(fileId, pageNum);
-
+      const blob = await fetchPage(fileId, pageNum, renderParams);
       modalContent = {
-        title: `${fileName}`,
+        title: fileName,
         imageBlob: blob,
         num_pages: numPages,
         page: pageNum,
         file_id: fileId,
         filename: fileName,
+        renderParams: { ...renderParams },
       };
     } catch (error: unknown) {
       modalContent = {
@@ -194,8 +199,37 @@
         page: pageNum,
         file_id: fileId,
         filename: fileName,
+        renderParams: { ...renderParams },
       };
     }
+  }
+
+  // Persist render preferences whenever they change.
+  $effect(() => {
+    savedFormat.set(renderParams.format);
+    savedScale.set(renderParams.scale);
+  });
+
+  // Re-fetch the current page only when renderParams changes,
+  // not when modalContent itself changes.
+  $effect(() => {
+    const { format, scale } = renderParams; // tracked — this is the trigger
+    const mc = untrack(() => modalContent); // untracked — read without subscribing
+
+    if (!mc || !mc.filename) return;
+    viewPage(mc.file_id, mc.page, mc.num_pages, mc.filename);
+  });
+
+  function handleFormatChange(format: RenderFormat) {
+    renderParams = { ...renderParams, format };
+  }
+
+  function handleScaleChange(scale: number) {
+    // Clamp to [1.0, 4.0] with one decimal place.
+    renderParams = {
+      ...renderParams,
+      scale: Math.round(Math.min(4.0, Math.max(1.0, scale)) * 10) / 10,
+    };
   }
 
   function switchTab(tab: string) {
@@ -226,6 +260,58 @@
       <div class="logo-text">
         <h1><a href="/">Lexicon</a></h1>
         <p class="tagline">Semantic Search Engine</p>
+      </div>
+    </div>
+
+    <div class="render-controls">
+      <label class="render-label" for="render-format">Format</label>
+      <div class="render-toggle" role="group" aria-label="Image format">
+        <button
+          type="button"
+          class="toggle-btn"
+          class:active={renderParams.format === "png"}
+          onclick={() => handleFormatChange("png")}>PNG</button
+        >
+        <button
+          type="button"
+          class="toggle-btn"
+          class:active={renderParams.format === "jpg"}
+          onclick={() => handleFormatChange("jpg")}>JPG</button
+        >
+      </div>
+
+      <label class="render-label" for="render-scale">
+        Scale <span class="scale-value">{renderParams.scale.toFixed(1)}×</span>
+      </label>
+      <div class="scale-control">
+        <button
+          type="button"
+          class="scale-step"
+          disabled={renderParams.scale <= 1.5}
+          onclick={() => handleScaleChange(renderParams.scale - 0.5)}
+          aria-label="Decrease scale">−</button
+        >
+        <input
+          id="render-scale"
+          type="range"
+          min="1.0"
+          max="4.0"
+          step="0.5"
+          value={renderParams.scale}
+          oninput={(e) =>
+            handleScaleChange(
+              Number((e.currentTarget as HTMLInputElement).value),
+            )}
+          aria-label="Render scale"
+          class="scale-slider"
+        />
+        <button
+          type="button"
+          class="scale-step"
+          disabled={renderParams.scale >= 4.0}
+          onclick={() => handleScaleChange(renderParams.scale + 0.5)}
+          aria-label="Increase scale">+</button
+        >
       </div>
     </div>
   </header>

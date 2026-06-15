@@ -1,3 +1,10 @@
+type RenderFormat = "png" | "jpg";
+
+type RenderParams = {
+    format: RenderFormat; // Default is JPEG because it is x2 smaller.
+    scale: number; // 1.0 – 4.0 (default is 2.0 -> Good balance between quality and size)
+};
+
 type FileType = {
     id: number;
     name: string;
@@ -35,7 +42,8 @@ type ModalContentType = {
     imageBlob?: Blob;
     error?: string;
     page: number;
-    filename: string,
-    file_id: number,
+    filename: string;
+    file_id: number;
     num_pages: number;
+    renderParams: RenderParams;
 };

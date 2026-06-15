@@ -1,3 +1,4 @@
+#include <lexicon/lexicon_pdf.h>
 #include <pulsar/pulsar.h>
 #include <solidc/defer.h>
 #include <solidc/dotenv.h>
@@ -81,10 +82,15 @@ void cors(PulsarCtx* ctx) {
     conn_writeheader_raw(ctx->conn, cors_headers, sizeof(cors_headers) - 1);
 }
 
-int main(int argc, char* argv[]) {
-    load_dotenv(".env");
-    defer_call(close_connections);
+void cleanup(void) {
+    close_connections();
+    pdf_library_destroy();
+}
 
+int main(int argc, char* argv[]) {
+    srand(time(NULL));
+    pdf_library_init();
+    load_dotenv(".env");
     ensure_valid_pgconn_string();
     root = flag_parser_new("lexicon", "Fast PDF indexer and server");
     defer_call1(flag_parser_free, root);
@@ -137,5 +143,8 @@ int main(int argc, char* argv[]) {
     Middleware mw[1] = {cors};
     use_global_middleware(mw, ARRAY_SIZE(mw));
 
+    defer {
+        cleanup();
+    };
     return pulsar_run(config.bind_addr, config.port);
 }
