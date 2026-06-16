@@ -131,7 +131,7 @@ int main(int argc, char* argv[]) {
     route_get("/api/list-files/{file_id}", get_file_by_id);
 
     /* Page detail endpoint */
-    route_get("/api/file/{file_id}/page/{page_num}", get_page_by_file_and_page);
+    route_get("/api/file/{file_id}/page/{page_num}", get_page_text);
     route_get("/api/file/{file_id}/render-page/{page_num}", render_pdfpage_as_image);
     route_get("/api/file/{file_id}/text-layer/{page_num}", get_pdfpage_text_layer);
 

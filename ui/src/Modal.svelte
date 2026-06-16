@@ -1643,6 +1643,14 @@
     align-items: flex-start;
   }
 
+  .modal-body:has(.plain-text-container) {
+    overflow-y: hidden;
+    background-color: black;
+    .page-canvas {
+      display: none;
+    }
+  }
+
   .canvas-container {
     position: relative;
     width: 100%;

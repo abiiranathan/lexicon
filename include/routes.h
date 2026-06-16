@@ -14,7 +14,7 @@ extern "C" {
  * Returns full text for a given file_id and page_num.
  * Path: /api/file/{file_id}/page/{page_num}
  */
-void get_page_by_file_and_page(PulsarCtx* ctx);
+void get_page_text(PulsarCtx* ctx);
 
 /**
  * GET /api/file/{file_id}/render-page/{page_num}

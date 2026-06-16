@@ -6,33 +6,13 @@
 #include <vfs.h>
 
 #include "../include/database.h"
+#include "../include/error_macros.h"
 #include "../include/json_response.h"
 #include "../include/routes.h"
 
 extern vfs_t* vfs;  // Instance of VFS defined in main.c.
 
-#define acquire_db(var)                                \
-    pgconn_t* var = pgpool_acquire(pool, 1000);        \
-    if (!(var)) {                                      \
-        send_json_error(conn, "Database unavailable"); \
-        return;                                        \
-    }                                                  \
-    defer {                                            \
-        pgpool_release(pool, (var));                   \
-    };
-
-#define handle_record_not_found(res, conn, errmsg) \
-    if (PQntuples(res) == 0) {                     \
-        conn_set_status(conn, StatusNotFound);     \
-        send_json_error(conn, errmsg);             \
-        return;                                    \
-    }
-
-#define handle_query_error(res, conn)                    \
-    if (!(res)) {                                        \
-        send_json_error(conn, pgpool_error_message(db)); \
-        return;                                          \
-    }
+#define handle_record_not_found(res, conn, errmsg) require_row((res), (conn), (errmsg))
 
 /**
  * Opens a document from the VFS if one exists, otherwise uses the host filesystem.
@@ -85,36 +65,52 @@ static inline void send_json_error(PulsarConn* conn, const char* msg) {
  *
  * Returns the extracted text of a single PDF page as JSON.
  */
-void get_page_by_file_and_page(PulsarCtx* ctx) {
+void get_page_text(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     yyjson_alc alc;
     yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
 
-    const char* file_id_str = get_path_param(conn, "file_id");
-    const char* page_num_str = get_path_param(conn, "page_num");
-
-    int64_t file_id = 0;
-    int64_t page_num = 0;
-
-    if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
-        send_json_error(conn, "Invalid file ID");
-        return;
-    }
-    if (str_to_i64(page_num_str, &page_num) != STO_SUCCESS) {
-        send_json_error(conn, "Invalid page number");
-        return;
-    }
+    require_path_param_i64(file_id, conn, "file_id");
+    require_path_param_i64(page_num, conn, "page_num");
 
     static const char* query = "SELECT text FROM pages WHERE file_id=$1 AND page_num=$2 LIMIT 1";
     const char* params[] = {file_id_str, page_num_str};
 
     acquire_db(db);
-    PGresult* res = pgpool_query_params(db, query, 2, params, -1);
-    defer_pqclear(res);
-    handle_query_error(res, conn);
-    handle_record_not_found(res, conn, "No page found for the requested file and page number");
+    run_query(res, db, query, 2, params);
+    char* text = "";
+    DEFER_VAR bool heap_allocated = false;
 
-    const char* text = PQgetvalue(res, 0, 0);
+    if (PQntuples(res) == 1) {
+        text = PQgetvalue(res, 0, 0);
+    } else {
+        // ============= parse the text from the document ============
+        // 1. Get right path from the database.
+        const char* query2 = "SELECT path FROM files WHERE id=$1 LIMIT 1";
+        const char* params2[] = {file_id_str};
+        run_query(res2, db, query2, 1, params2);
+        require_row(res2, conn, "No file matches the provided Identifier");
+        const char* path = PQgetvalue(res2, 0, 0);
+
+        open_pdf_document(doc, path, num_pages);
+        open_pdf_page(page, doc, page_num - 1, conn);
+        pdf_text_t* th = NULL;
+        if (pdf_text_open(&page, &th) != PDF_OK) { text = ""; }
+        char* utf8 = NULL;
+        pdf_text_utf8(th, &utf8);
+
+        // Okay to set because its heap allocated.
+        if (utf8 != NULL) {
+            text = utf8;
+            heap_allocated = true;
+        }
+    }
+
+    // Free heap allocated text.
+    defer {
+        if (heap_allocated) { free(text); }
+    };
+
     StrSlice response = json_create_page_response(&alc, file_id, (int)page_num, text);
     if (!ss_is_valid(response)) {
         send_json_error(conn, "Failed to serialize JSON");
@@ -133,20 +129,8 @@ void get_page_by_file_and_page(PulsarCtx* ctx) {
  */
 void render_pdfpage_as_image(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    require_path_param(file_id_str, conn, "file_id");
-    require_path_param(page_num_str, conn, "page_num");
-
-    int64_t file_id = 0;
-    int page = 0;
-    if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
-        send_json_error(conn, "Invalid file ID: must be a valid integer");
-        return;
-    }
-
-    if (str_to_int(page_num_str, &page) != STO_SUCCESS) {
-        send_json_error(conn, "Invalid page number: must be a valid integer");
-        return;
-    }
+    require_path_param_i64(file_id, conn, "file_id");
+    require_path_param_int(page, conn, "page_num");
 
     /* Extract scale and type from query options */
     float scale = 2.0f;
@@ -164,43 +148,13 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     const char* params[] = {file_id_str};
 
     acquire_db(db);
-    PGresult* res = pgpool_query_params(db, query, 1, params, -1);
-    defer_pqclear(res);
-
-    handle_query_error(res, conn);
-    handle_record_not_found(res, conn, "No file found for the requested file");
+    run_query(res, db, query, 1, params);
+    require_row(res, conn, "No file found for the requested file");
 
     const char* path = PQgetvalue(res, 0, 0);
-    printf("Serving page %d of file: %s\n", page, path);
-
-    int num_pages = 0;
-    pdf_document_t doc_var = {0};
-    pdf_document_t* doc = &doc_var;
-    void* vfs_data = NULL;
-    if (!gen_open_document(doc, path, &num_pages, &vfs_data)) {
-        send_json_error(conn, "Failed to open PDF document");
-        return;
-    }
-
-    defer {
-        pdf_document_close(doc);
-        free(vfs_data);
-    };
-
-    if (page < 1 || page > num_pages) {
-        send_json_error(conn, "Page out of range");
-        return;
-    }
-
-    printf("Opening PDF page\n");
-    pdf_page_t ppage = {0};
-    if (pdf_page_open(doc, page - 1, &ppage) != PDF_OK) {
-        send_json_error(conn, "Error getting page from PDF");
-        return;
-    }
-    defer {
-        pdf_page_close(&ppage);
-    };
+    open_pdf_document(doc, path, num_pages);
+    require_page_in_range(page, num_pages, conn);
+    open_pdf_page(ppage, doc, page - 1, conn);
 
     pdf_bitmap_t bmp = {0};
     if (pdf_page_render(&ppage, scale, &bmp) != PDF_OK) {
@@ -240,60 +194,20 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
  */
 void get_pdfpage_text_layer(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    require_path_param(file_id_str, conn, "file_id");
-    require_path_param(page_num_str, conn, "page_num");
-
-    int64_t file_id = 0;
-    int page = 0;
-    if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
-        send_json_error(conn, "Invalid file ID: must be a valid integer");
-        return;
-    }
-
-    if (str_to_int(page_num_str, &page) != STO_SUCCESS) {
-        send_json_error(conn, "Invalid page number: must be a valid integer");
-        return;
-    }
+    require_path_param_i64(file_id, conn, "file_id");
+    require_path_param_int(page, conn, "page_num");
 
     static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
     const char* params[] = {file_id_str};
 
     acquire_db(db);
-    PGresult* res = pgpool_query_params(db, query, 1, params, -1);
-    defer_pqclear(res);
-
-    handle_query_error(res, conn);
-    handle_record_not_found(res, conn, "No file found for the requested file");
+    run_query(res, db, query, 1, params);
+    require_row(res, conn, "No file found for the requested file");
 
     const char* path = PQgetvalue(res, 0, 0);
-
-    int num_pages = 0;
-    pdf_document_t doc_var = {0};
-    pdf_document_t* doc = &doc_var;
-    void* vfs_data = NULL;
-    if (!gen_open_document(doc, path, &num_pages, &vfs_data)) {
-        send_json_error(conn, "Failed to open PDF document");
-        return;
-    }
-
-    defer {
-        pdf_document_close(doc);
-        free(vfs_data);
-    };
-
-    if (page < 1 || page > num_pages) {
-        send_json_error(conn, "Page out of range");
-        return;
-    }
-
-    pdf_page_t ppage = {0};
-    if (pdf_page_open(doc, page - 1, &ppage) != PDF_OK) {
-        send_json_error(conn, "Error getting page from PDF");
-        return;
-    }
-    defer {
-        pdf_page_close(&ppage);
-    };
+    open_pdf_document(doc, path, num_pages);
+    require_page_in_range(page, num_pages, conn);
+    open_pdf_page(ppage, doc, page - 1, conn);
 
     pdf_text_t text = {0};
     if (pdf_text_init(&ppage, &text) != PDF_OK) {
@@ -402,9 +316,8 @@ void pdf_search(PulsarCtx* ctx) {
 
     PGresult* res = NULL;
     TIME_BLOCK("pdfsearch", { res = pgpool_query_params(db, full_query, param_count, params, -1); });
+    abort_if_nullptr(res, conn, "Error running query for the search");
     defer_pqclear(res);
-
-    handle_query_error(res, conn);
 
     yyjson_alc alc;
     yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
@@ -477,9 +390,7 @@ void list_files(PulsarCtx* ctx) {
         param_count = 2;
     }
 
-    PGresult* res = pgpool_query_params(db, query, param_count, params, -1);
-    handle_query_error(res, conn);
-    defer_pqclear(res);
+    run_query(res, db, query, param_count, params);
 
     size_t jsonlen = 0;
     yyjson_alc alc;
@@ -499,24 +410,13 @@ void list_files(PulsarCtx* ctx) {
  */
 void get_file_by_id(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
-    const char* file_id_str = get_path_param(conn, "file_id");
-
-    int64_t file_id = 0;
-    if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
-        send_json_error(conn, "Invalid file ID");
-        return;
-    }
-
+    require_path_param_i64(file_id, conn, "file_id");
     acquire_db(db);
 
     static const char* query = "SELECT name, path, num_pages FROM files WHERE id=$1 LIMIT 1";
     const char* params[] = {file_id_str};
-
-    PGresult* res = pgpool_query_params(db, query, 1, params, -1);
-    handle_query_error(res, conn);
-    defer_pqclear(res);
-
-    handle_record_not_found(res, conn, "No book matches the requested ID");
+    run_query(res, db, query, 1, params);
+    require_row(res, conn, "No book matches the requested ID");
 
     const char* file_name = PQgetvalue(res, 0, 0);
     const char* file_path = PQgetvalue(res, 0, 1);
