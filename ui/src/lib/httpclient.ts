@@ -1,5 +1,20 @@
 const baseURL = (import.meta.env.VITE_SERVER_URL as string);
 
+/**
+ * Reads the response body once as text, then attempts JSON parsing to extract
+ * a structured error message. Falls back to the raw text, then to the HTTP
+ * status line if the body is empty.
+ */
+async function extractError(response: Response): Promise<Error> {
+    const body = await response.text();
+    try {
+        const json = JSON.parse(body);
+        return new Error(json.error ?? json.message ?? body);
+    } catch {
+        return new Error(body || `HTTP ${response.status} ${response.statusText}`);
+    }
+}
+
 export async function loadAllFiles(params: FileSearchParams): Promise<FileListResult> {
     const searchParams = new URLSearchParams();
 
@@ -13,20 +28,22 @@ export async function loadAllFiles(params: FileSearchParams): Promise<FileListRe
         searchParams.append("page", params.page.toString());
     }
 
-    const query = searchParams.toString();
-    const url = `${baseURL}/api/list-files?${query}`;
+    const url = `${baseURL}/api/list-files?${searchParams.toString()}`;
     const res = await fetch(url);
-    const data = await res.json();
-    return data;
+    if (!res.ok) throw await extractError(res);
+    return res.json();
 }
 
 export async function getFileByID(fileId: number): Promise<FileType> {
-    const response = await fetch(`${baseURL}/api/list-files/${fileId}`);
-    const data = await response.json();
-    return data;
+    const res = await fetch(`${baseURL}/api/list-files/${fileId}`);
+    if (!res.ok) throw await extractError(res);
+    return res.json();
 }
 
-export async function searchAPI(query: string, args?: { fileId?: number }): Promise<{ results: SearchResult[] }> {
+export async function searchAPI(
+    query: string,
+    args?: { fileId?: number },
+): Promise<{ results: SearchResult[] }> {
     const params = new URLSearchParams();
     params.set("q", query);
 
@@ -34,10 +51,9 @@ export async function searchAPI(query: string, args?: { fileId?: number }): Prom
         params.set("file_id", args.fileId.toString());
     }
 
-    const url = `${baseURL}/api/search?${params.toString()}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    return data;
+    const res = await fetch(`${baseURL}/api/search?${params.toString()}`);
+    if (!res.ok) throw await extractError(res);
+    return res.json();
 }
 
 export async function fetchPage(
@@ -49,11 +65,26 @@ export async function fetchPage(
         format: renderParams.format,
         scale: renderParams.scale.toString(),
     });
-    const url = `${baseURL}/api/file/${fileId}/render-page/${pageNum}?${params.toString()}`;
-    const response = await fetch(url);
-    if (response.ok) {
-        return response.blob();
-    }
-    const error = await response.json();
-    throw new Error(error.error ?? String(error));
+    const res = await fetch(`${baseURL}/api/file/${fileId}/render-page/${pageNum}?${params.toString()}`);
+    if (!res.ok) throw await extractError(res);
+    return res.blob();
+}
+
+export async function fetchTextLayer(
+    fileId: number,
+    pageNum: number,
+): Promise<TextLayerResult> {
+    const res = await fetch(`${baseURL}/api/file/${fileId}/text-layer/${pageNum}`);
+    if (!res.ok) throw await extractError(res);
+    return res.json();
+}
+
+export async function fetchPageText(
+    fileId: number,
+    pageNum: number,
+): Promise<string> {
+    const res = await fetch(`${baseURL}/api/file/${fileId}/page/${pageNum}`);
+    if (!res.ok) throw await extractError(res);
+    const data: Page = await res.json();
+    return data.text.replace(/^\uFEFF/, "").replace(/\uFFFE/g, "");
 }

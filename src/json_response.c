@@ -1,4 +1,5 @@
 #include "../include/json_response.h"
+#include <math.h>
 #include "../include/database.h"
 
 /**
@@ -30,7 +31,7 @@ static char* serialize_doc(yyjson_mut_doc* doc, yyjson_alc* alc, size_t* out_len
  * @return        Caller-owned JSON string. Lifetime governed by @p alc.
  */
 char* json_create_error(yyjson_alc* alc, const char* msg, size_t* out_len) {
-    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -52,7 +53,7 @@ char* json_create_error(yyjson_alc* alc, const char* msg, size_t* out_len) {
  * @return         StrSlice pointing into the serialized JSON string.
  */
 StrSlice json_create_page_response(yyjson_alc* alc, int64_t file_id, int page_num, const char* text) {
-    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -79,7 +80,7 @@ StrSlice json_create_page_response(yyjson_alc* alc, int64_t file_id, int page_nu
  */
 char* json_create_file_response(yyjson_alc* alc, int64_t id, const char* name, const char* path, int64_t num_pages,
                                 size_t* out_len) {
-    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -110,7 +111,7 @@ char* json_create_file_response(yyjson_alc* alc, int64_t id, const char* name, c
  * @return            JSON string. Lifetime governed by @p alc.
  */
 char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit, int64_t total_count, size_t* out_len) {
-    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -168,7 +169,7 @@ char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit,
  * @return        JSON string. Lifetime governed by @p alc.
  */
 char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* query, size_t* out_len) {
-    yyjson_mut_doc* doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
@@ -201,6 +202,49 @@ char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* que
     yyjson_mut_obj_add_val(doc, root, "results", results_array);
     yyjson_mut_obj_add_uint(doc, root, "count", yyjson_mut_arr_size(results_array));
     yyjson_mut_obj_add_str(doc, root, "query", query);
+
+    return serialize_doc(doc, alc, out_len);
+}
+
+/** Rounds a value to 2 decimal places to shrink JSON output size. */
+static inline double round2(double v) {
+    return round(v * 100.0) / 100.0;
+}
+/**
+ * Builds a JSON text-layer object from per-character boxes.
+ *
+ * @param alc         Allocator for the output buffer. See serialize_doc().
+ * @param page_width  Page width in PDF points.
+ * @param page_height Page height in PDF points.
+ * @param boxes       Array of character boxes. May be NULL if count is 0.
+ * @param count       Number of entries in @p boxes.
+ * @param out_len     Set to the byte length of the returned string. May be NULL.
+ * @return            JSON string. Lifetime governed by @p alc.
+ */
+char* json_create_text_layer(yyjson_alc* alc, float page_width, float page_height, const pdf_char_box_t* boxes,
+                             int count, size_t* out_len) {
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
+    yyjson_mut_val* root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+
+    yyjson_mut_obj_add_real(doc, root, "width", round2(page_width));
+    yyjson_mut_obj_add_real(doc, root, "height", round2(page_height));
+
+    yyjson_mut_val* chars_array = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "chars", chars_array);
+
+    for (int i = 0; i < count; i++) {
+        const pdf_char_box_t* b = &boxes[i];
+
+        yyjson_mut_val* box_obj = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_uint(doc, box_obj, "c", b->codepoint);
+        yyjson_mut_obj_add_real(doc, box_obj, "l", round2(b->left));
+        yyjson_mut_obj_add_real(doc, box_obj, "r", round2(b->right));
+        yyjson_mut_obj_add_real(doc, box_obj, "b", round2(b->bottom));
+        yyjson_mut_obj_add_real(doc, box_obj, "t", round2(b->top));
+
+        yyjson_mut_arr_append(chars_array, box_obj);
+    }
 
     return serialize_doc(doc, alc, out_len);
 }

@@ -252,7 +252,7 @@
 
   .result-item {
     background: rgba(255, 255, 255, 0.02);
-    border: 1px solid var(--border);
+    border: 1px solid rgb(245 249 255 / 25%);
     border-radius: 0.875rem;
     padding: 1.125rem 1.25rem;
     cursor: pointer;
@@ -314,7 +314,7 @@
     line-height: 1.6;
     margin-bottom: 0.75rem;
     display: -webkit-box;
-    -webkit-line-clamp: 3;
+    -webkit-line-clamp: 10;
     line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;

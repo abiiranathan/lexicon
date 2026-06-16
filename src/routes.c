@@ -228,6 +228,109 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
 }
 
 /**
+ * GET /files/:file_id/pages/:page_num/text-layer
+ *
+ * Returns per-character bounding boxes for a PDF page, for building a
+ * selectable text overlay on top of a separately-rendered image. Boxes
+ * are in PDF point space; the client must scale them using the same
+ * `scale` factor passed to the render endpoint.
+ */
+void get_pdfpage_text_layer(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
+    require_path_param(file_id_str, conn, "file_id");
+    require_path_param(page_num_str, conn, "page_num");
+
+    int64_t file_id = 0;
+    int page = 0;
+    if (str_to_i64(file_id_str, &file_id) != STO_SUCCESS) {
+        send_json_error(conn, "Invalid file ID: must be a valid integer");
+        return;
+    }
+
+    if (str_to_int(page_num_str, &page) != STO_SUCCESS) {
+        send_json_error(conn, "Invalid page number: must be a valid integer");
+        return;
+    }
+
+    static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
+    const char* params[] = {file_id_str};
+
+    acquire_db(db);
+    PGresult* res = pgpool_query_params(db, query, 1, params, -1);
+    defer_pqclear(res);
+
+    handle_query_error(res, conn);
+    handle_record_not_found(res, conn, "No file found for the requested file");
+
+    const char* path = PQgetvalue(res, 0, 0);
+
+    int num_pages = 0;
+    pdf_document_t doc_var = {0};
+    pdf_document_t* doc = &doc_var;
+    if (!gen_open_document(doc, path, &num_pages)) {
+        send_json_error(conn, "Failed to open PDF document");
+        return;
+    }
+    defer {
+        pdf_document_close(doc);
+    };
+
+    if (page < 1 || page > num_pages) {
+        send_json_error(conn, "Page out of range");
+        return;
+    }
+
+    pdf_page_t ppage = {0};
+    if (pdf_page_open(doc, page - 1, &ppage) != PDF_OK) {
+        send_json_error(conn, "Error getting page from PDF");
+        return;
+    }
+    defer {
+        pdf_page_close(&ppage);
+    };
+
+    pdf_text_t text = {0};
+    if (pdf_text_init(&ppage, &text) != PDF_OK) {
+        send_json_error(conn, "Failed to load text layer for page");
+        return;
+    }
+    defer {
+        pdf_text_destroy(&text);
+    };
+
+    yyjson_alc alc;
+    Arena* arena = conn->arena;
+    yyjson_alc_from_arena(&alc, arena);
+
+    int char_count = pdf_text_char_count(&text);
+    pdf_char_box_t* boxes = NULL;
+
+    if (char_count > 0) {
+        boxes = arena_alloc(arena, (size_t)char_count * sizeof(*boxes));
+        if (boxes == NULL) {
+            send_json_error(conn, "Out of memory extracting text layout");
+            return;
+        }
+        if (pdf_text_char_boxes(&text, 0, char_count, boxes) != PDF_OK) {
+            send_json_error(conn, "Failed to extract character boxes");
+            return;
+        }
+    }
+
+    size_t out_len = 0;
+    char* json = json_create_text_layer(&alc, pdf_page_width(&ppage), pdf_page_height(&ppage), boxes, char_count,
+                                        &out_len);
+    if (json == NULL) {
+        send_json_error(conn, "Failed to serialize text layout");
+        return;
+    }
+
+    static const char* headers = "Content-Type: application/json\r\nCache-Control: public, max-age=3600\r\n";
+    conn_writeheader_raw(conn, headers, strlen(headers));
+    conn_write(conn, json, out_len);
+}
+
+/**
  * GET /search?q=<query>[&file_id=<id>]
  *
  * Full-text search across all pages, optionally scoped to a single file.

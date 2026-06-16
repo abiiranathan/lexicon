@@ -47,3 +47,24 @@ type ModalContentType = {
     num_pages: number;
     renderParams: RenderParams;
 };
+
+type TextChar = {
+    c: number; // codepoint
+    l: number; // left
+    r: number; // right
+    b: number; // bottom
+    t: number; // top
+};
+
+type TextLayerResult = {
+    width: number;
+    height: number;
+    chars: TextChar[];
+};
+
+
+type Page = {
+    file_id: number;
+    page_num: number;
+    text: string;
+}

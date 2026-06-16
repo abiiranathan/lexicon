@@ -1,6 +1,7 @@
 #ifndef JSON_RESPONSES_H
 #define JSON_RESPONSES_H
 
+#include <lexicon/lexicon_pdf.h>
 #include <libpq-fe.h>  // For PGresult
 #include <pgpool/pgtypes.h>
 #include <solidc/str_slice.h>
@@ -87,5 +88,22 @@ char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit,
  * @return        JSON string. Lifetime governed by @p alc.
  */
 char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* query, size_t* out_len);
+
+/**
+ * Builds a JSON text-layer object for a rendered PDF page:
+ *   {"width": ..., "height": ..., "chars": [{"c":N,"l":F,"r":F,"b":F,"t":F}, ...]}
+ *
+ * Coordinates are in PDF point space, matching pdf_page_width()/height().
+ *
+ * @param alc         Allocator for the output buffer. See serialize_doc().
+ * @param page_width  Page width in PDF points.
+ * @param page_height Page height in PDF points.
+ * @param boxes       Array of character boxes, as filled by pdf_text_char_boxes().
+ * @param count       Number of entries in @p boxes.
+ * @param out_len     Set to the byte length of the returned string. May be NULL.
+ * @return            JSON string. Lifetime governed by @p alc.
+ */
+char* json_create_text_layer(yyjson_alc* alc, float page_width, float page_height, const pdf_char_box_t* boxes,
+                             int count, size_t* out_len);
 
 #endif  // JSON_RESPONSES_H

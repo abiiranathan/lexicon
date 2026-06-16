@@ -16,8 +16,25 @@ extern "C" {
  */
 void get_page_by_file_and_page(PulsarCtx* ctx);
 
-// Renders a PDF page as PNG image.
+/**
+ * GET /api/file/{file_id}/render-page/{page_num}
+ *
+ * Renders a single PDF page to an in-memory compressed image and streams it.
+ * Optional query parameters:
+ *   - scale: float scaling factor (default: 2.0)
+ *   - type: format type, "png" or "jpg" (default: "jpg")
+ */
 void render_pdfpage_as_image(PulsarCtx* ctx);
+
+/**
+ * GET /api/file/{file_id}/text-layer/{page_num}
+ *
+ * Returns per-character bounding boxes for a PDF page, for building a
+ * selectable text overlay on top of a separately-rendered image. Boxes
+ * are in PDF point space; the client must scale them using the same
+ * `scale` factor passed to the render endpoint.
+ */
+void get_pdfpage_text_layer(PulsarCtx* ctx);
 
 /**
  * Performs full-text search on PDF pages.

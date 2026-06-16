@@ -1,6 +1,7 @@
 <!-- Modal.svelte -->
 <script lang="ts">
-  import { searchAPI } from "./lib/httpclient";
+  import { searchAPI, fetchPageText } from "./lib/httpclient";
+  import { useLocalStorage } from "./lib/localstorage.svelte";
 
   type ModalProps = {
     isOpen: boolean;
@@ -24,6 +25,10 @@
   let containerElement = $state<HTMLDivElement | null>(null);
   let imageLoaded = $state(false);
   let loadedImage = $state<HTMLImageElement | null>(null);
+
+  // Text layer state
+  let renderTextSetting = useLocalStorage("render-text", true);
+  let pageText = $state<string>("");
 
   // View mode: default to 'fit' on small screens (< 760px) and 'scroll' on larger screens
   let viewMode = $state<"fit" | "scroll">(
@@ -91,8 +96,60 @@
     document.body.style.overflow = isOpen ? "hidden" : "auto";
   });
 
+  // Fetch text layer coordinates asynchronously
+  $effect(() => {
+    if (!isOpen || !modalContent) {
+      pageText = "";
+      return;
+    }
+
+    const fileId = modalContent.file_id;
+    const pageNum = modalContent.page;
+
+    if (!renderTextSetting.value) {
+      pageText = "";
+      return;
+    }
+
+    let active = true;
+
+    fetchPageText(fileId, pageNum)
+      .then((data) => {
+        if (active) {
+          pageText = data;
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          pageText = "";
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  });
+
+  let copySuccess = $state(false);
+
+  function copyToClipboard(): void {
+    if (!pageText) return;
+
+    navigator.clipboard
+      .writeText(pageText)
+      .then(() => {
+        copySuccess = true;
+        setTimeout(() => {
+          copySuccess = false;
+        }, 2000);
+      })
+      .catch((err) => {
+        console.error("Failed to copy text:", err);
+      });
+  }
+
   // ---------------------------------------------------------------------------
-  // Canvas rendering — logic preserved verbatim from original.
+  // Canvas rendering — pure image scaling and rotation
   // ---------------------------------------------------------------------------
 
   const isLandscapeRotation = $derived(rotation === 90 || rotation === 270);
@@ -255,7 +312,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Input handlers — logic preserved verbatim from original.
+  // Input handlers — panning, zooming, rotation, keyboard bindings
   // ---------------------------------------------------------------------------
 
   function handleWheel(e: WheelEvent): void {
@@ -410,7 +467,7 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Page navigation — logic preserved verbatim from original.
+  // Page navigation
   // ---------------------------------------------------------------------------
 
   const viewPrevPage = (): void => {
@@ -467,12 +524,7 @@
   };
 
   // ---------------------------------------------------------------------------
-  // Search — FIXED:
-  //   1. handleSearchInput debounces auto-search (300 ms) so the user gets
-  //      live results without pressing Enter.
-  //   2. handleSearchSubmit fires immediately on Enter / button click.
-  //   3. highlightText converts <b>…</b> → <mark>…</mark> for all snippets.
-  //   4. Clearing the query clears results immediately.
+  // Search
   // ---------------------------------------------------------------------------
 
   function highlightText(text: string): string {
@@ -552,7 +604,6 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
     class="modal"
-    onclick={onClose}
     role="dialog"
     aria-modal="true"
     aria-labelledby="modal-title"
@@ -667,6 +718,33 @@
           {/if}
 
           {#if imageLoaded}
+            <!-- Text View Panel Toggle -->
+            <button
+              class="icon-btn"
+              class:icon-btn--active={renderTextSetting.value}
+              onclick={() => renderTextSetting.set(!renderTextSetting.value)}
+              aria-label={renderTextSetting.value
+                ? "Hide text panel"
+                : "Show text panel"}
+              title={renderTextSetting.value
+                ? "Hide text panel"
+                : "Show text panel"}
+              type="button"
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <polyline points="4 7 4 4 20 4 20 7"></polyline>
+                <line x1="9" y1="20" x2="15" y2="20"></line>
+                <line x1="12" y1="4" x2="12" y2="20"></line>
+              </svg>
+            </button>
+
             <!-- Rotate -->
             <button
               class="icon-btn"
@@ -1006,12 +1084,43 @@
               class:dragging={isDragging}
               class:fit-mode={viewMode === "fit"}
             ></canvas>
+
             {#if !imageLoaded}
               <div class="canvas-loading">
                 <div class="canvas-spinner"></div>
               </div>
             {/if}
           </div>
+
+          <!-- Reconstructed Plain Text View Overlay -->
+          {#if renderTextSetting.value && pageText}
+            <div class="plain-text-container">
+              <div class="plain-text-header">
+                <span class="plain-text-title"
+                  >Page {modalContent.page} Text</span
+                >
+                <div class="plain-text-actions">
+                  <button
+                    class="plain-text-btn"
+                    onclick={copyToClipboard}
+                    type="button"
+                  >
+                    {copySuccess ? "Copied" : "Copy Text"}
+                  </button>
+                  <button
+                    class="plain-text-btn plain-text-btn--close"
+                    onclick={() => renderTextSetting.set(false)}
+                    type="button"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+              <div class="plain-text-content">
+                {pageText}
+              </div>
+            </div>
+          {/if}
         {/if}
       </div>
 
@@ -1068,6 +1177,26 @@
           </div>
 
           <div class="hud-actions">
+            <button
+              class="hud-action"
+              class:icon-btn--active={renderTextSetting.value}
+              onclick={() => renderTextSetting.set(!renderTextSetting.value)}
+              aria-label="Toggle text overlay"
+              type="button"
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <polyline points="4 7 4 4 20 4 20 7"></polyline>
+                <line x1="9" y1="20" x2="15" y2="20"></line>
+                <line x1="12" y1="4" x2="12" y2="20"></line>
+              </svg>
+            </button>
             <button
               class="hud-action"
               onclick={rotateImage}
@@ -1352,8 +1481,8 @@
   .search-field {
     width: 200px;
     padding: 0.4375rem 2rem 0.4375rem 2rem;
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid var(--border);
+    background: rgba(37, 36, 36, 0.3);
+    border: 1px solid #4d5070;
     border-radius: 0.5rem;
     color: var(--text-primary);
     font-size: 0.8125rem;
@@ -1483,7 +1612,7 @@
     line-height: 1.5;
     margin: 0;
     display: -webkit-box;
-    -webkit-line-clamp: 3;
+    -webkit-line-clamp: 5;
     line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
@@ -1506,6 +1635,7 @@
     align-items: center;
     justify-content: center;
     background: #0c1018;
+    position: relative !important; /* Critical to anchor the absolute child overlay panel */
   }
 
   .modal-body.scroll-mode {
@@ -1546,6 +1676,96 @@
   }
   .page-canvas.fit-mode:not(.dragging) {
     cursor: grab;
+  }
+
+  /* ── Plain Text Overlay Panel ── */
+  .plain-text-container {
+    position: absolute !important;
+    top: 1.25rem !important;
+    left: 1.25rem !important;
+    right: 1.25rem !important;
+    bottom: 1.25rem !important;
+    background-color: #0f172a !important; /* Force solid background color */
+    border: 1px solid var(--border) !important;
+    border-radius: 0.75rem !important;
+    display: flex !important;
+    flex-direction: column !important;
+    z-index: 50 !important;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.75) !important;
+    overflow: hidden !important;
+  }
+
+  .plain-text-header {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding: 0.75rem 1.25rem !important;
+    border-bottom: 1px solid var(--border) !important;
+    background-color: #1e293b !important; /* solid Slate 800 */
+    flex-shrink: 0 !important;
+  }
+
+  .plain-text-title {
+    font-size: 0.8125rem !important;
+    font-weight: 600 !important;
+    color: var(--text-secondary) !important;
+  }
+
+  .plain-text-actions {
+    display: flex !important;
+    gap: 0.5rem !important;
+  }
+
+  .plain-text-btn {
+    background-color: rgba(255, 255, 255, 0.08) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text-primary) !important;
+    padding: 0.375rem 0.75rem !important;
+    font-size: 0.75rem !important;
+    font-weight: 500 !important;
+    border-radius: 0.375rem !important;
+    cursor: pointer !important;
+    transition:
+      background-color 0.12s,
+      border-color 0.12s !important;
+  }
+
+  .plain-text-btn:hover {
+    background-color: rgba(255, 255, 255, 0.15) !important;
+    border-color: var(--text-muted) !important;
+  }
+
+  .plain-text-btn--close {
+    background-color: rgba(239, 68, 68, 0.1) !important;
+    border-color: rgba(239, 68, 68, 0.2) !important;
+    color: #f87171 !important;
+  }
+
+  .plain-text-btn--close:hover {
+    background-color: rgba(239, 68, 68, 0.2) !important;
+    border-color: rgba(239, 68, 68, 0.4) !important;
+  }
+
+  .plain-text-content {
+    flex: 1 !important;
+    overflow-y: auto !important;
+    padding: 1.5rem !important;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      monospace !important;
+    font-size: 1.2rem !important;
+    line-height: 1.7 !important;
+    color: #18212a !important;
+    white-space: pre-line !important;
+    user-select: text !important;
+    -webkit-user-select: text !important;
+    background-color: white !important;
+  }
+
+  .plain-text-content :global(mark) {
+    background-color: rgba(245, 158, 11, 0.3) !important;
+    color: #fbbf24 !important;
+    border-radius: 2px !important;
+    padding: 0 2px !important;
   }
 
   .canvas-loading {
