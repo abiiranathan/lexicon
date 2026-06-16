@@ -39,16 +39,17 @@ extern vfs_t* vfs;  // Instance of VFS defined in main.c.
  *
  * @param path       Path to the file.
  * @param num_pages  Receives the page count on success.
+ * @param vfs_data  Pointer to write allocated VFS data that must then be freed after pdf_document_close.
  * @return           true on success.
  */
-bool gen_open_document(pdf_document_t* doc, const char* path, int* num_pages) {
+bool gen_open_document(pdf_document_t* doc, const char* path, int* num_pages, void** vfs_data) {
     pdf_status_t status = PDF_OK;
     if (vfs != NULL) {
         size_t size = 0;
-        void* data = vfs_read_file(vfs, path, &size);
-        if (!data) return NULL;
-        // takes ownership of the data.
-        status = pdf_document_open_mem(doc, data, size, NULL);
+        *vfs_data = vfs_read_file(vfs, path, &size);
+        if (!*vfs_data) return false;
+        // takes ownership of the data but must be freed after pdf_document_close.
+        status = pdf_document_open_mem(doc, *vfs_data, size, NULL);
     } else {
         status = pdf_document_open(doc, path, NULL);
     }
@@ -175,13 +176,15 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     int num_pages = 0;
     pdf_document_t doc_var = {0};
     pdf_document_t* doc = &doc_var;
-    if (!gen_open_document(doc, path, &num_pages)) {
+    void* vfs_data = NULL;
+    if (!gen_open_document(doc, path, &num_pages, &vfs_data)) {
         send_json_error(conn, "Failed to open PDF document");
         return;
     }
 
     defer {
         pdf_document_close(doc);
+        free(vfs_data);
     };
 
     if (page < 1 || page > num_pages) {
@@ -267,12 +270,15 @@ void get_pdfpage_text_layer(PulsarCtx* ctx) {
     int num_pages = 0;
     pdf_document_t doc_var = {0};
     pdf_document_t* doc = &doc_var;
-    if (!gen_open_document(doc, path, &num_pages)) {
+    void* vfs_data = NULL;
+    if (!gen_open_document(doc, path, &num_pages, &vfs_data)) {
         send_json_error(conn, "Failed to open PDF document");
         return;
     }
+
     defer {
         pdf_document_close(doc);
+        free(vfs_data);
     };
 
     if (page < 1 || page > num_pages) {

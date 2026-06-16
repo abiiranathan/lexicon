@@ -340,6 +340,11 @@ static void record_outcome(IndexerState* is, const char* path, OutcomeCode outco
     const char* base = strrchr(path, '/');
     printf(">>> [%d] %s — %s\n", is->processed_count, base ? base + 1 : path, outcome_to_str(outcome));
     fflush(stdout);
+
+#if defined(__GLIBC__)
+    // Trim memory every 25 files to keep RSS low during runtime
+    if (is->processed_count % 25 == 0) { malloc_trim(0); }
+#endif
 }
 
 static bool process_vfs_file(const char* path, const vfs_stat_t* st, void* userdata) {
