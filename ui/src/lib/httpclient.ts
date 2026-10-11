@@ -1,4 +1,4 @@
-const baseURL = (import.meta.env.VITE_SERVER_URL as string);
+const baseURL = import.meta.env.VITE_SERVER_URL;
 
 /**
  * Reads the response body once as text, then attempts JSON parsing to extract
