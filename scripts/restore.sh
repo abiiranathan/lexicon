@@ -4,15 +4,11 @@
 
 set -euo pipefail
 
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
 # Configuration - Override via environment variables
-readonly BACKUP_DIR="${BACKUP_DIR:-${HOME}/.pg_backups}"
-readonly DB_NAME="${DB_NAME:-}"
-readonly DB_USER="${DB_USER:-postgres}"
-readonly DB_HOST="${DB_HOST:-localhost}"
-readonly DB_PORT="${DB_PORT:-5432}"
 readonly BACKUP_FILE="${BACKUP_FILE:-}"
 readonly PARALLEL_JOBS="${PARALLEL_JOBS:-4}"
-readonly TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 readonly LOG_FILE="${BACKUP_DIR}/restore_${TIMESTAMP}.log"
 readonly FORCE_RESTORE="${FORCE_RESTORE:-false}"
 

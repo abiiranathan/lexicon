@@ -21,10 +21,13 @@ typedef struct {
     bool dryrun;         // Perform dry-run
 } AppConfig;
 
-static AppConfig config = {.port = 8080, .min_pages = 4, .frontend_dir = "./ui/dist"};
-FlagParser *root = NULL, *indexer = NULL;
+static AppConfig config = {
+    .port = 8080,
+    .min_pages = 4,
+    .frontend_dir = "./ui/dist",
+};
 
-// Virtual File System image. (exported to other files)
+FlagParser *root = NULL, *idxcmd = NULL;
 vfs_t* vfs = NULL;
 char* conn_info = NULL;
 
@@ -33,11 +36,10 @@ void ensure_valid_pgconn_string() {
     // Use config connection if passed.
     if (config.pgconn != NULL) return;
 
-    // Fallback to environment variable PGCONN and fail if not dound.
+    // Fallback to environment variable.
     config.pgconn = getenv("PGCONN");
     if (config.pgconn == NULL) {
-        puts("PGCONN environment variable must be set or pass --pgconn flag to the program");
-        exit(EXIT_FAILURE);
+        LOG_FATAL("PGCONN environment variable must be set or pass --pgconn flag to the program");
     }
 }
 
@@ -47,8 +49,7 @@ static void cli_pre_exec_handler(void* user_data) {
     if (c->vfs_path) {
         vfs_status_t status = vfs_open(c->vfs_path, true, &vfs);
         if (status != VFS_OK) {
-            LOG_ERROR("failed to open VFS: %s -- %s", c->vfs_path, vfs_strerror(status));
-            exit(EXIT_FAILURE);
+            LOG_FATAL("failed to open VFS: %s -- %s", c->vfs_path, vfs_strerror(status));
         }
     }
 
@@ -66,19 +67,18 @@ static void cli_pre_exec_handler(void* user_data) {
 static void cli_build_pdf_index(void* user_data) {
     AppConfig* appcfg = user_data;
     if (!vfs && !appcfg->root_dir) {
-        fprintf(stderr, "--root directory must be provided when not using a VFS\n");
-        exit(EXIT_FAILURE);
+        LOG_FATAL("--root directory must be provided when not using a VFS");
     }
     process_pdfs(appcfg->root_dir, appcfg->min_pages, appcfg->dryrun);
-    exit(EXIT_SUCCESS);
+    puts("PDF indexing completed successfully");
 }
 
 // CORS middleware.
 void cors(PulsarCtx* ctx) {
     /* Add CORS headers for font-end during dev */
-    static const char cors_headers
-        [] = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
-             "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
+    static const char cors_headers[] =
+        "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, "
+        "OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\n";
     conn_writeheader_raw(ctx->conn, cors_headers, sizeof(cors_headers) - 1);
 }
 
@@ -95,18 +95,22 @@ int main(int argc, char* argv[]) {
     root = flag_parser_new("lexicon", "Fast PDF indexer and server");
     defer_call1(flag_parser_free, root);
 
+    // root and/or root flags should be registered as persistent so that they are available to all
+    // subcommands.
+    flag_persistent_string(root, "vfs", 'v', "Path to Virtual File System image (.vfs)",
+                           &config.vfs_path);
+    flag_persistent_string(root, "root", 'r', "Root directory of pdfs", &config.root_dir);
+
     // Global flags
     flag_int(root, "port", 'p', "The server port", &config.port);
     flag_string(root, "addr", 'a', "Bind address", &config.bind_addr);
     flag_string(root, "pgconn", 'c', "Postgres connection URI", &config.pgconn);
     flag_string(root, "build-dir", 'd', "Frontend build directory", &config.frontend_dir);
-    flag_string(root, "vfs", 'v', "Path to Virtual File System image (.vfs)", &config.vfs_path);
 
     // Index subcommand and its flags.
-    indexer = flag_add_subcommand(root, "index", "Build PDF index into the db", cli_build_pdf_index);
-    flag_string(indexer, "root", 'r', "Root directory of pdfs", &config.root_dir);
-    flag_int(indexer, "min_pages", 'p', "Minimum number of pages in PDF", &config.min_pages);
-    flag_bool(indexer, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun);
+    idxcmd = flag_add_subcommand(root, "index", "Build PDF index into the db", cli_build_pdf_index);
+    flag_int(idxcmd, "min_pages", 'p', "Minimum number of pages in PDF", &config.min_pages);
+    flag_bool(idxcmd, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun);
 
     // Before the matching subcommand runs, we need to connect to the database.
     flag_set_pre_invoke(root, cli_pre_exec_handler);
@@ -114,15 +118,11 @@ int main(int argc, char* argv[]) {
     // Set the server config as user-data for all handlers.
     FlagStatus status = flag_parse_and_invoke(root, argc, argv, &config);
     if (status != FLAG_OK) {
-        fprintf(stderr, "ERROR: %s\n", flag_status_str(status));
-        flag_print_usage(root);
-        exit(EXIT_FAILURE);
+        LOG_FATAL("Failed to parse command line arguments: %s", flag_status_str(status));
     }
 
     if (!is_dir(config.frontend_dir)) {
-        fprintf(stderr, "ERROR: --build-dir must specify a valid directory.\n");
-        flag_print_usage(root);
-        exit(EXIT_FAILURE);
+        LOG_FATAL("Frontend build directory does not exist: %s", config.frontend_dir);
     }
 
     // Register all routes
@@ -144,8 +144,6 @@ int main(int argc, char* argv[]) {
     Middleware mw[1] = {cors};
     use_global_middleware(mw, ARRAY_SIZE(mw));
 
-    defer {
-        cleanup();
-    };
+    defer { cleanup(); };
     return pulsar_run(config.bind_addr, config.port);
 }
