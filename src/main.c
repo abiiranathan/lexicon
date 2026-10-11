@@ -127,6 +127,7 @@ int main(int argc, char* argv[]) {
 
     // Register all routes
     route_get("/api/search", pdf_search);
+    route_get("/api/list-books", list_books);
     route_get("/api/list-files", list_files);
     route_get("/api/list-files/{file_id}", get_file_by_id);
 

@@ -470,9 +470,20 @@
   // Page navigation
   // ---------------------------------------------------------------------------
 
+  const navigateToPage = (
+    fileId: number,
+    pageNum: number,
+    numPages: number,
+    fileName: string,
+  ): void => {
+    const scrollContainer = containerElement?.parentElement;
+    if (scrollContainer) scrollContainer.scrollTop = 0;
+    viewPage(fileId, pageNum, numPages, fileName);
+  };
+
   const viewPrevPage = (): void => {
     if (!modalContent || modalContent.page === 1) return;
-    viewPage(
+    navigateToPage(
       modalContent.file_id,
       modalContent.page - 1,
       modalContent.num_pages,
@@ -482,7 +493,7 @@
 
   const viewNextPage = (): void => {
     if (!modalContent || modalContent.page === modalContent.num_pages) return;
-    viewPage(
+    navigateToPage(
       modalContent.file_id,
       modalContent.page + 1,
       modalContent.num_pages,
@@ -500,7 +511,7 @@
       return;
     }
 
-    viewPage(
+    navigateToPage(
       modalContent.file_id,
       pageNum,
       modalContent.num_pages,
@@ -583,7 +594,7 @@
   }
 
   const handleResultClick = (result: SearchResult): void => {
-    viewPage(
+    navigateToPage(
       result.file_id,
       result.page_num,
       result.num_pages,

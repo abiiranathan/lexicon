@@ -19,7 +19,8 @@ extern vfs_t* vfs;  // Instance of VFS defined in main.c.
  *
  * @param path       Path to the file.
  * @param num_pages  Receives the page count on success.
- * @param vfs_data  Pointer to write allocated VFS data that must then be freed after pdf_document_close.
+ * @param vfs_data  Pointer to write allocated VFS data that must then be freed after
+ * pdf_document_close.
  * @return           true on success.
  */
 bool gen_open_document(pdf_document_t* doc, const char* path, int* num_pages, void** vfs_data) {
@@ -95,7 +96,9 @@ void get_page_text(PulsarCtx* ctx) {
         open_pdf_document(doc, path, num_pages);
         open_pdf_page(page, doc, page_num - 1, conn);
         pdf_text_t* th = NULL;
-        if (pdf_text_open(&page, &th) != PDF_OK) { text = ""; }
+        if (pdf_text_open(&page, &th) != PDF_OK) {
+            text = "";
+        }
         char* utf8 = NULL;
         pdf_text_utf8(th, &utf8);
 
@@ -108,7 +111,9 @@ void get_page_text(PulsarCtx* ctx) {
 
     // Free heap allocated text.
     defer {
-        if (heap_allocated) { free(text); }
+        if (heap_allocated) {
+            free(text);
+        }
     };
 
     StrSlice response = json_create_page_response(&alc, file_id, (int)page_num, text);
@@ -116,6 +121,10 @@ void get_page_text(PulsarCtx* ctx) {
         send_json_error(conn, "Failed to serialize JSON");
         return;
     }
+
+    // cache for 1 hour since page text rarely changes and is derived from the PDF itself.
+    static const char* headers = "Cache-Control: public, max-age=3600\r\n";
+    conn_writeheader_raw(conn, headers, strlen(headers));
     conn_send_json(conn, StatusOK, response.data, response.len);
 }
 
@@ -138,7 +147,9 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
     if (scale_str) {
         char* endptr = NULL;
         float parsed = strtof(scale_str, &endptr);
-        if (endptr != scale_str && parsed > 0.0f) { scale = parsed; }
+        if (endptr != scale_str && parsed > 0.0f) {
+            scale = parsed;
+        }
     }
 
     const char* type_str = query_get(conn, "type");
@@ -161,9 +172,7 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
         send_json_error(conn, "Failed to render PDF page");
         return;
     }
-    defer {
-        pdf_bitmap_free(&bmp);
-    };
+    defer { pdf_bitmap_free(&bmp); };
 
     uint8_t* img_data = NULL;
     size_t img_size = 0;
@@ -176,8 +185,11 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
         return;
     }
 
-    char headers[128];
-    snprintf(headers, sizeof(headers), "Content-Type: %s\r\nCache-Control: public, max-age=3600\r\n",
+    char headers[128] = {0};
+
+    // cache for 12 hours since rendered images rarely change and are derived from the PDF itself.
+    snprintf(headers, sizeof(headers),
+             "Content-Type: %s\r\nCache-Control: public, max-age=43200\r\n",
              is_png ? "image/png" : "image/jpeg");
     conn_writeheader_raw(conn, headers, strlen(headers));
     conn_write(conn, img_data, img_size);
@@ -214,9 +226,7 @@ void get_pdfpage_text_layer(PulsarCtx* ctx) {
         send_json_error(conn, "Failed to load text layer for page");
         return;
     }
-    defer {
-        pdf_text_destroy(&text);
-    };
+    defer { pdf_text_destroy(&text); };
 
     yyjson_alc alc;
     Arena* arena = conn->arena;
@@ -238,14 +248,16 @@ void get_pdfpage_text_layer(PulsarCtx* ctx) {
     }
 
     size_t out_len = 0;
-    char* json = json_create_text_layer(&alc, pdf_page_width(&ppage), pdf_page_height(&ppage), boxes, char_count,
-                                        &out_len);
+    char* json = json_create_text_layer(&alc, pdf_page_width(&ppage), pdf_page_height(&ppage),
+                                        boxes, char_count, &out_len);
     if (json == NULL) {
         send_json_error(conn, "Failed to serialize text layout");
         return;
     }
 
-    static const char* headers = "Content-Type: application/json\r\nCache-Control: public, max-age=3600\r\n";
+    // cache for 1 hour since text layout rarely changes and is derived from the PDF itself.
+    static const char* headers =
+        "Content-Type: application/json\r\nCache-Control: public, max-age=3600\r\n";
     conn_writeheader_raw(conn, headers, strlen(headers));
     conn_write(conn, json, out_len);
 }
@@ -269,45 +281,46 @@ void pdf_search(PulsarCtx* ctx) {
         param_count = 2;
     }
 
-    static const char common_cte
-        [] = "WITH input_queries AS ("
-             "  SELECT"
-             "    websearch_to_tsquery('english', $1) AS broad_query,"
-             "    phraseto_tsquery('english', $1)     AS phrase_query"
-             "),"
-             "RankedPages AS ("
-             "  SELECT"
-             "    p.file_id, p.page_num,"
-             "    ("
-             "      ts_rank_cd(p.text_vector, inputs.broad_query)"
-             "      + (CASE WHEN p.text_vector @@ inputs.phrase_query THEN 10.0 ELSE 0.0 END)"
-             "    ) AS rank"
-             "  FROM pages p"
-             "  CROSS JOIN input_queries inputs"
-             "  WHERE p.text_vector @@ inputs.broad_query";
+    static const char common_cte[] =
+        "WITH input_queries AS ("
+        "  SELECT"
+        "    websearch_to_tsquery('english', $1) AS broad_query,"
+        "    phraseto_tsquery('english', $1)     AS phrase_query"
+        "),"
+        "RankedPages AS ("
+        "  SELECT"
+        "    p.file_id, p.page_num,"
+        "    ("
+        "      ts_rank_cd(p.text_vector, inputs.broad_query)"
+        "      + (CASE WHEN p.text_vector @@ inputs.phrase_query THEN 10.0 ELSE 0.0 END)"
+        "    ) AS rank"
+        "  FROM pages p"
+        "  CROSS JOIN input_queries inputs"
+        "  WHERE p.text_vector @@ inputs.broad_query";
 
-    static const char query_suffix
-        [] = "  ORDER BY rank DESC LIMIT 100"
-             "),"
-             "UniquePages AS ("
-             "  SELECT DISTINCT ON (file_id, page_num) file_id, page_num, rank"
-             "  FROM RankedPages ORDER BY file_id, page_num, rank DESC"
-             ")"
-             "SELECT"
-             "  u.file_id, f.name, f.num_pages, u.page_num,"
-             "  ts_headline('english', p.text, inputs.broad_query,"
-             "    'StartSel=<b>, StopSel=</b>, MaxWords=200, MinWords=20') AS snippet,"
-             "  LEFT(p.text, 2000) AS extended_snippet,"
-             "  u.rank"
-             " FROM UniquePages u"
-             " CROSS JOIN input_queries inputs"
-             " JOIN files f ON u.file_id = f.id"
-             " JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num"
-             " ORDER BY u.rank DESC, f.name, u.page_num LIMIT 100";
+    static const char query_suffix[] =
+        "  ORDER BY rank DESC LIMIT 100"
+        "),"
+        "UniquePages AS ("
+        "  SELECT DISTINCT ON (file_id, page_num) file_id, page_num, rank"
+        "  FROM RankedPages ORDER BY file_id, page_num, rank DESC"
+        ")"
+        "SELECT"
+        "  u.file_id, f.name, f.num_pages, u.page_num,"
+        "  ts_headline('english', p.text, inputs.broad_query,"
+        "    'StartSel=<b>, StopSel=</b>, MaxWords=200, MinWords=20') AS snippet,"
+        "  LEFT(p.text, 2000) AS extended_snippet,"
+        "  u.rank"
+        " FROM UniquePages u"
+        " CROSS JOIN input_queries inputs"
+        " JOIN files f ON u.file_id = f.id"
+        " JOIN pages p ON u.file_id = p.file_id AND u.page_num = p.page_num"
+        " ORDER BY u.rank DESC, f.name, u.page_num LIMIT 100";
 
     char full_query[4096];
     if (file_id) {
-        snprintf(full_query, sizeof(full_query), "%s AND p.file_id = $2 %s", common_cte, query_suffix);
+        snprintf(full_query, sizeof(full_query), "%s AND p.file_id = $2 %s", common_cte,
+                 query_suffix);
     } else {
         snprintf(full_query, sizeof(full_query), "%s %s", common_cte, query_suffix);
     }
@@ -315,7 +328,8 @@ void pdf_search(PulsarCtx* ctx) {
     acquire_db(db);
 
     PGresult* res = NULL;
-    TIME_BLOCK("pdfsearch", { res = pgpool_query_params(db, full_query, param_count, params, -1); });
+    TIME_BLOCK("pdfsearch",
+               { res = pgpool_query_params(db, full_query, param_count, params, -1); });
     abort_if_nullptr(res, conn, "Error running query for the search");
     defer_pqclear(res);
 
@@ -340,10 +354,16 @@ void list_files(PulsarCtx* ctx) {
 
     int page = 1;
     int page_size = 10;
-    if (page_str) { str_to_int(page_str, &page); }
-    if (page_size_str) { str_to_int(page_size_str, &page_size); }
+    if (page_str) {
+        str_to_int(page_str, &page);
+    }
+    if (page_size_str) {
+        str_to_int(page_size_str, &page_size);
+    }
 
-    if (page < 1) { page = 1; }
+    if (page < 1) {
+        page = 1;
+    }
     if (page_size < 1) {
         page_size = 25;
     } else if (page_size > 100) {
@@ -363,7 +383,9 @@ void list_files(PulsarCtx* ctx) {
     int64_t total_count = 0;
     if (PQntuples(count_res) > 0) {
         const char* count_str = PQgetvalue(count_res, 0, 0);
-        if (count_str) { str_to_i64(count_str, &total_count); }
+        if (count_str) {
+            str_to_i64(count_str, &total_count);
+        }
     }
 
     int offset = (page - 1) * page_size;
@@ -378,7 +400,9 @@ void list_files(PulsarCtx* ctx) {
     char name_filter[128] = {0};
     if (name) {
         snprintf(name_filter, sizeof(name_filter), "%%%s%%", name);
-        query = "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT $2 OFFSET $3";
+        query =
+            "SELECT id, name, path, num_pages FROM files WHERE name ILIKE $1 ORDER BY name LIMIT "
+            "$2 OFFSET $3";
         params[0] = name_filter;
         params[1] = limit_str;
         params[2] = offset_str;
@@ -404,6 +428,37 @@ void list_files(PulsarCtx* ctx) {
 }
 
 /**
+ * GET /api/list-books
+ *
+ * Returns every indexed PDF file as JSON.
+ */
+void list_books(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
+    acquire_db(db);
+
+    static const char* query = "SELECT id, name, path, num_pages FROM files ORDER BY path, name";
+    run_query(res, db, query, 0, NULL);
+
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
+    size_t jsonlen = 0;
+    char* json_str = json_create_book_list(&alc, res, &jsonlen);
+    if (!json_str) {
+        send_json_error(conn, "Failed to serialize JSON response");
+        return;
+    }
+
+    // Since books are not paginated and rarely change, we can set a long cache duration to reduce
+    // load on the server. Here we cache for 24 hours (86400 seconds). The client can still choose
+    // to revalidate if needed.
+    static const char* headers = "Cache-Control: public, max-age=86400\r\n";
+    conn_writeheader_raw(conn, headers, strlen(headers));
+
+    // Send the JSON response with HTTP 200 OK.
+    conn_send_json(conn, StatusOK, json_str, jsonlen);
+}
+
+/**
  * GET /files/:file_id
  *
  * Returns metadata for a single file as JSON.
@@ -423,13 +478,20 @@ void get_file_by_id(PulsarCtx* ctx) {
     const char* num_pages_str = PQgetvalue(res, 0, 2);
 
     int64_t num_pages = 0;
-    if (num_pages_str) { str_to_i64(num_pages_str, &num_pages); }
+    if (num_pages_str) {
+        str_to_i64(num_pages_str, &num_pages);
+    }
 
     yyjson_alc alc;
     yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
 
     size_t jsonlen = 0;
-    char* json_str = json_create_file_response(&alc, file_id, file_name, file_path, num_pages, &jsonlen);
+    char* json_str =
+        json_create_file_response(&alc, file_id, file_name, file_path, num_pages, &jsonlen);
     abort_if_nullptr(json_str, conn, "Failed to serialize JSON");
+
+    // cache for 24 hours since file metadata rarely changes.
+    static const char* headers = "Cache-Control: public, max-age=86400\r\n";
+    conn_writeheader_raw(conn, headers, strlen(headers));
     conn_send_json(conn, StatusOK, json_str, jsonlen);
 }

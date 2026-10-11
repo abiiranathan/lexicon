@@ -110,14 +110,7 @@ char* json_create_file_response(yyjson_alc* alc, int64_t id, const char* name, c
  * @param out_len     Set to the byte length of the returned string. May be NULL.
  * @return            JSON string. Lifetime governed by @p alc.
  */
-char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit, int64_t total_count, size_t* out_len) {
-    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
-    yyjson_mut_val* root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    yyjson_mut_val* results_array = yyjson_mut_arr(doc);
-    yyjson_mut_obj_add_val(doc, root, "results", results_array);
-
+static void add_file_results(yyjson_mut_doc* doc, yyjson_mut_val* results_array, PGresult* res) {
     int ntuples = PQntuples(res);
     for (int i = 0; i < ntuples; i++) {
         const char* file_id_str = PQgetvalue(res, i, 0);
@@ -138,6 +131,16 @@ char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit,
 
         yyjson_mut_arr_append(results_array, result_obj);
     }
+}
+
+char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit, int64_t total_count, size_t* out_len) {
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
+    yyjson_mut_val* root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+
+    yyjson_mut_val* results_array = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "results", results_array);
+    add_file_results(doc, results_array, res);
 
     int64_t total_pages = (total_count + limit - 1) / limit;
     if (total_pages == 0) total_pages = 1;
@@ -148,6 +151,19 @@ char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit,
     yyjson_mut_obj_add_int(doc, root, "total_pages", (int)total_pages);
     yyjson_mut_obj_add_bool(doc, root, "has_next", page < total_pages);
     yyjson_mut_obj_add_bool(doc, root, "has_prev", page > 1);
+
+    return serialize_doc(doc, alc, out_len);
+}
+
+char* json_create_book_list(yyjson_alc* alc, PGresult* res, size_t* out_len) {
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
+    yyjson_mut_val* root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+
+    yyjson_mut_val* results_array = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "results", results_array);
+    add_file_results(doc, results_array, res);
+    yyjson_mut_obj_add_int(doc, root, "total_count", PQntuples(res));
 
     return serialize_doc(doc, alc, out_len);
 }

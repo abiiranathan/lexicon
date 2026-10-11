@@ -72,6 +72,12 @@ char* json_create_file_response(yyjson_alc* alc, int64_t id, const char* name, c
 char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit, int64_t total_count, size_t* out_len);
 
 /**
+ * Builds an unpaginated JSON list of all books from a PGresult.
+ * Output shape: {"results": [...], "total_count": N}.
+ */
+char* json_create_book_list(yyjson_alc* alc, PGresult* res, size_t* out_len);
+
+/**
  * Builds a JSON search result list from a PGresult.
  *
  * Expected column order in @p res:

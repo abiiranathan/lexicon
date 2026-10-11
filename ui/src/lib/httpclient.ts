@@ -15,21 +15,8 @@ async function extractError(response: Response): Promise<Error> {
     }
 }
 
-export async function loadAllFiles(params: FileSearchParams): Promise<FileListResult> {
-    const searchParams = new URLSearchParams();
-
-    if (params.limit) {
-        searchParams.append("limit", params.limit.toString());
-    }
-    if (params.name) {
-        searchParams.append("name", params.name);
-    }
-    if (params.page) {
-        searchParams.append("page", params.page.toString());
-    }
-
-    const url = `${baseURL}/api/list-files?${searchParams.toString()}`;
-    const res = await fetch(url);
+export async function loadAllBooks(): Promise<BookListResult> {
+    const res = await fetch(`${baseURL}/api/list-books`);
     if (!res.ok) throw await extractError(res);
     return res.json();
 }

@@ -50,6 +50,14 @@ void pdf_search(PulsarCtx* ctx);
  */
 void list_files(PulsarCtx* ctx);
 
+/**
+ * GET /api/list-books
+ *
+ * Lists every indexed PDF without pagination. Returns {"results": [...],
+ * "total_count": N}; each result contains id, name, path, and num_pages.
+ */
+void list_books(PulsarCtx* ctx);
+
 /** Retrieves a single file by its ID. */
 void get_file_by_id(PulsarCtx* ctx);
 

@@ -9,7 +9,7 @@
   import {
     fetchPage,
     getFileByID,
-    loadAllFiles,
+    loadAllBooks,
     searchAPI,
   } from "./lib/httpclient";
   import { useLocalStorage } from "./lib/localstorage.svelte";
@@ -39,18 +39,11 @@
 
   let searchResults = $state<{ results: SearchResult[] }>({ results: [] });
 
-  let files = $state<FileListResult>({
+  let files = $state<BookListResult>({
     results: [],
-    page: 1,
     total_count: 0,
-    limit: 25,
-    has_next: false,
-    has_prev: false,
-    total_pages: 0,
   });
 
-  let currentPage = $state(1);
-  let pageLimit = $state(25);
   let isSearching = $state(false);
   let duration = $state(0);
   let isLoadingFiles = $state(false);
@@ -60,13 +53,12 @@
   let searchCache = $state(new Map());
   const maxCacheSize = 100;
   let searchTimeout: any;
-  let fileFilterTimeout: any;
 
   // URL state
   let params = new SvelteURLSearchParams(location.search);
 
   onMount(() => {
-    loadFiles(currentPage, pageLimit);
+    loadFiles();
     handleSearch(searchQuery.value);
 
     const fileIdString = params.get("file");
@@ -124,21 +116,12 @@
     duration = performance.now() - start;
   }
 
-  async function loadFiles(
-    page: number = 1,
-    limit: number = 25,
-    nameFilter: string = "",
-  ) {
+  async function loadFiles() {
     isLoadingFiles = true;
     filesError = null;
 
-    const p: FileSearchParams = { page, limit };
-    if (nameFilter?.trim()) p.name = nameFilter.trim();
-
     try {
-      files = await loadAllFiles(p);
-      currentPage = page;
-      pageLimit = limit;
+      files = await loadAllBooks();
     } catch (error: unknown) {
       filesError = (error as Error).message;
     } finally {
@@ -149,29 +132,6 @@
   function handleSearchSubmit() {
     clearTimeout(searchTimeout);
     if (searchQuery.value) handleSearch(searchQuery.value);
-  }
-
-  function handleFileNameFilterInput(
-    event: Event & { currentTarget: EventTarget & HTMLInputElement },
-  ) {
-    const filter = event.currentTarget.value;
-    fileNameFilter.set(filter);
-    clearTimeout(fileFilterTimeout);
-    fileFilterTimeout = setTimeout(() => {
-      currentPage = 1;
-      loadFiles(1, pageLimit, filter);
-    }, 300);
-  }
-
-  function handlePageChange(page: number) {
-    if (page < 1) return;
-    loadFiles(page, pageLimit, fileNameFilter.value);
-  }
-
-  function handleLimitChange(limit: number) {
-    pageLimit = limit;
-    currentPage = 1;
-    loadFiles(1, limit, fileNameFilter.value);
   }
 
   async function viewPage(
@@ -234,9 +194,6 @@
 
   function switchTab(tab: string) {
     currentTab.set(tab);
-    if (tab === "files" && files.results.length === 0) {
-      loadFiles(currentPage, pageLimit);
-    }
   }
 
   function handleModalClose() {
@@ -246,7 +203,6 @@
   $effect(() => {
     return () => {
       clearTimeout(searchTimeout);
-      clearTimeout(fileFilterTimeout);
     };
   });
 </script>
@@ -347,81 +303,19 @@
           class="file-name-filter"
           placeholder="Filter by file name..."
           value={fileNameFilter.value}
-          oninput={handleFileNameFilterInput}
+          oninput={(e: Event) =>
+            fileNameFilter.set((e.currentTarget as HTMLInputElement).value)}
         />
-        <div class="limit-selector">
-          <label for="limit-select">Show:</label>
-          <select
-            id="limit-select"
-            value={pageLimit}
-            onchange={(e: Event) =>
-              handleLimitChange(
-                Number((e.currentTarget as HTMLSelectElement).value),
-              )}
-          >
-            <option value={10}>10 items</option>
-            <option value={25}>25 items</option>
-            <option value={50}>50 items</option>
-            <option value={100}>100 items</option>
-          </select>
-        </div>
+        <span class="library-count">{files.total_count} books</span>
       </div>
 
       <FilesList
         {files}
+        filter={fileNameFilter.value}
         isLoading={isLoadingFiles}
         error={filesError}
         {viewPage}
       />
-
-      {#if files.total_count > 0}
-        <div class="pagination">
-          <button
-            class="pagination-btn"
-            disabled={!files.has_prev || isLoadingFiles}
-            onclick={() => handlePageChange(currentPage - 1)}
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="M15 19l-7-7 7-7" />
-            </svg>
-            Prev
-          </button>
-
-          <div class="pagination-info">
-            <span class="page-numbers">
-              {files.page} / {Math.ceil(files.total_count / files.limit)}
-            </span>
-            <span class="total-count">
-              {files.total_count} files total
-            </span>
-          </div>
-
-          <button
-            class="pagination-btn"
-            disabled={!files.has_next || isLoadingFiles}
-            onclick={() => handlePageChange(currentPage + 1)}
-          >
-            Next
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="M9 5l7 7-7 7" />
-            </svg>
-          </button>
-        </div>
-      {/if}
     {/if}
   </section>
 </div>
