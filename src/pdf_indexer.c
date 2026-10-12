@@ -45,9 +45,10 @@ static void sigint_handler(int sig) {
 #define COPY_ROW_BUF (MAX_PAGE_TEXT_LEN * 2 + 64)
 
 static const char* const skip_dirs[] = {
-    "node_modules", ".git",   ".svn",     ".hg",    "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",    "venv",
-    ".venv",        "env",    ".env",     "vendor", "build",       "dist",          "target",      ".gradle", ".idea",
-    ".vscode",      ".cache", "coverage", ".next",  ".nuxt",       ".turbo",        ".DS_Store",   NULL,
+    "node_modules", ".git",   ".svn",    ".hg",       "__pycache__", ".pytest_cache", ".mypy_cache",
+    ".tox",         "venv",   ".venv",   "env",       ".env",        "vendor",        "build",
+    "dist",         "target", ".gradle", ".idea",     ".vscode",     ".cache",        "coverage",
+    ".next",        ".nuxt",  ".turbo",  ".DS_Store", NULL,
 };
 
 /** Processing outcome for a single PDF. */
@@ -100,7 +101,7 @@ static void reusable_buffer_free(ReusableBuffer* buf) {
 }
 
 /**
- * Loads the file at @p path into @p buf, reallocating the internal buffer 
+ * Loads the file at @p path into @p buf, reallocating the internal buffer
  * only when the file size exceeds the current capacity.
  */
 static bool reusable_buffer_load(const char* path, ReusableBuffer* buf) {
@@ -130,7 +131,9 @@ static bool reusable_buffer_load(const char* path, ReusableBuffer* buf) {
     }
 
     buf->size = req_size;
-    if (buf->size && fread(buf->data, 1, buf->size, f) != buf->size) { goto err_close; }
+    if (buf->size && fread(buf->data, 1, buf->size, f) != buf->size) {
+        goto err_close;
+    }
 
     fclose(f);
     return true;
@@ -194,13 +197,16 @@ static ssize_t copy_escape(const char* src, char* dst, size_t cap) {
  * @param m         Pointer to the persistent file buffer.
  * @return Processing outcome code.
  */
-static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun, PGconn* conn, ReusableBuffer* m) {
+static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun, PGconn* conn,
+                                   ReusableBuffer* m) {
     OutcomeCode outcome = OUTCOME_LOAD_ERROR;
 
     if (!reusable_buffer_load(path, m)) return OUTCOME_LOAD_ERROR;
 
     pdf_document_t doc = {0};
-    if (pdf_document_open_mem(&doc, m->data, m->size, NULL) != PDF_OK) { return OUTCOME_OPEN_ERROR; }
+    if (pdf_document_open_mem(&doc, m->data, m->size, NULL) != PDF_OK) {
+        return OUTCOME_OPEN_ERROR;
+    }
 
     int npages = pdf_document_page_count(&doc);
     if (npages <= 0 || npages < min_pages || dryrun) {
@@ -241,7 +247,8 @@ static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun,
     }
 
     /* Initiate COPY FROM STDIN */
-    PGresult* copy_res = PQexec(conn, "COPY pages(file_id, page_num, text) FROM STDIN (ON_ERROR ignore);");
+    PGresult* copy_res =
+        PQexec(conn, "COPY pages(file_id, page_num, text) FROM STDIN (ON_ERROR ignore);");
     if (!copy_res || PQresultStatus(copy_res) != PGRES_COPY_IN) {
         fprintf(stderr, ">>> COPY start failed for '%s': %s\n", name, PQerrorMessage(conn));
         if (copy_res) PQclear(copy_res);
@@ -269,7 +276,8 @@ static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun,
 
         size_t written = 0;
         /* Read directly into stack buffer instead of allocating */
-        if (pdf_text_utf8_buf(th, raw_buf, sizeof(raw_buf) - 1, &written) == PDF_OK && written > 0) {
+        if (pdf_text_utf8_buf(th, raw_buf, sizeof(raw_buf) - 1, &written) == PDF_OK &&
+            written > 0) {
             raw_buf[written] = '\0';
 
             if (copy_escape(raw_buf, escaped, sizeof(escaped)) >= 0) {
@@ -295,7 +303,8 @@ static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun,
     PGresult* fin;
     while ((fin = PQgetResult(conn)) != NULL) {
         if (copy_ok && PQresultStatus(fin) != PGRES_COMMAND_OK) {
-            fprintf(stderr, ">>> COPY finalise failed for '%s': %s\n", name, PQresultErrorMessage(fin));
+            fprintf(stderr, ">>> COPY finalise failed for '%s': %s\n", name,
+                    PQresultErrorMessage(fin));
             copy_ok = false;
         }
         PQclear(fin);
@@ -307,7 +316,9 @@ static OutcomeCode process_one_pdf(const char* path, int min_pages, bool dryrun,
             fprintf(stderr, ">>> COMMIT failed: %s\n", PQerrorMessage(conn));
             copy_ok = false;
         }
-        if (commit_res) { PQclear(commit_res); }
+        if (commit_res) {
+            PQclear(commit_res);
+        }
     } else {
         PGresult* roll_res = PQexec(conn, "ROLLBACK");
         PQclear(roll_res);
@@ -338,12 +349,15 @@ static void record_outcome(IndexerState* is, const char* path, OutcomeCode outco
     is->outcome_counts[(int)outcome]++;
 
     const char* base = strrchr(path, '/');
-    printf(">>> [%d] %s — %s\n", is->processed_count, base ? base + 1 : path, outcome_to_str(outcome));
+    printf(">>> [%d] %s — %s\n", is->processed_count, base ? base + 1 : path,
+           outcome_to_str(outcome));
     fflush(stdout);
 
 #if defined(__GLIBC__)
     // Trim memory every 25 files to keep RSS low during runtime
-    if (is->processed_count % 25 == 0) { malloc_trim(0); }
+    if (is->processed_count % 25 == 0) {
+        malloc_trim(0);
+    }
 #endif
 }
 
@@ -360,7 +374,8 @@ static bool process_vfs_file(const char* path, const vfs_stat_t* st, void* userd
     return true;
 }
 
-static WalkDirOption process_host_file(const FileAttributes* attr, const char* path, const char* name, void* userdata) {
+static WalkDirOption process_host_file(const FileAttributes* attr, const char* path,
+                                       const char* name, void* userdata) {
     (void)attr;
     IndexerState* is = (IndexerState*)userdata;
     if (g_cancel_requested) return DirStop;
@@ -381,7 +396,7 @@ static WalkDirOption process_host_file(const FileAttributes* attr, const char* p
  * Public Entry Point
  * ======================================================================= */
 
-bool process_pdfs(const char* root_dir, int min_pages, bool dryrun) {
+bool process_pdfs(const char* root_dir, const char* filename, int min_pages, bool dryrun) {
     struct sigaction sa = {.sa_handler = sigint_handler, .sa_flags = 0};
     struct sigaction old_int, old_term;
     sigemptyset(&sa.sa_mask);
@@ -400,32 +415,64 @@ bool process_pdfs(const char* root_dir, int min_pages, bool dryrun) {
         PQfinish(raw_conn);
         return false;
     }
-    defer {
-        PQfinish(raw_conn);
-    };
+    defer { PQfinish(raw_conn); };
 
     if (!dryrun) {
         PGresult* sync_res = PQexec(raw_conn, "SET synchronous_commit = off");
-        if (sync_res) { PQclear(sync_res); }
+        if (sync_res) {
+            PQclear(sync_res);
+        }
     }
 
-    IndexerState is = {.processed_count = 0,
-                       .min_pages = min_pages,
-                       .dryrun = dryrun,
-                       .conn = raw_conn,
-                       .outcome_counts = {0},
-                       .file_buf = {0}};
+    IndexerState indexerState = {
+        .processed_count = 0,
+        .min_pages = min_pages,
+        .dryrun = dryrun,
+        .conn = raw_conn,
+        .outcome_counts = {0},
+        .file_buf = {0},
+    };
 
     if (vfs != NULL) {
         if (dryrun) printf("Performing VFS index dry run\n");
-        vfs_list(vfs, NULL, process_vfs_file, &is);
+
+        // If a filename is provided, process only that file. Otherwise, list all files in the VFS
+        // and process them. vfs_stat_t is unused so we pass NULL for it.
+        // The process_vfs_file callback will handle the actual processing.
+        if (filename) {
+            if (!vfs_exists(vfs, filename)) {
+                LOG_FATAL("File does not exist in VFS: %s", filename);
+            }
+            if (!(process_vfs_file(filename, NULL, &indexerState))) {
+                LOG_FATAL("Failed to process file in VFS: %s", filename);
+            }
+        } else {
+            vfs_list(vfs, NULL, process_vfs_file, &indexerState);
+        }
     } else {
-        if (dryrun) printf("Performing host index dry run on %s\n", root_dir);
-        dir_walk(root_dir, process_host_file, &is);
+        if (filename) {
+            if (!is_file(filename)) {
+                LOG_FATAL("File does not exist: %s", filename);
+            }
+
+            // Get the basename of the file.
+            const char* slash = strrchr(filename, '/');
+            const char* base = (slash != NULL) ? slash + 1 : filename;
+
+            // Process the single file relative to the root directory.
+            if (!(process_host_file(NULL, filename, base, &indexerState))) {
+                LOG_FATAL("Failed to process file: %s", filename);
+            }
+        } else if (!is_dir(root_dir)) {
+            LOG_FATAL("Root directory does not exist: %s", root_dir);
+            // If root is a valid directory.
+            if (dryrun) printf("Performing host index dry run on %s\n", root_dir);
+            dir_walk(root_dir, process_host_file, &indexerState);
+        }
     }
 
     /* Free the persistent file buffer once processing is fully completed */
-    reusable_buffer_free(&is.file_buf);
+    reusable_buffer_free(&indexerState.file_buf);
 
 #if defined(__GLIBC__)
     /* Trim once at the end of processing instead of per file to minimize system overhead */
@@ -433,12 +480,15 @@ bool process_pdfs(const char* root_dir, int min_pages, bool dryrun) {
 #endif
 
     bool cancelled = g_cancel_requested;
-    printf(">>> Indexing complete: %d PDFs processed%s\n", is.processed_count, cancelled ? " (interrupted)" : "");
+    printf(">>> Indexing complete: %d PDFs processed%s\n", indexerState.processed_count,
+           cancelled ? " (interrupted)" : "");
     printf(
         ">>> Outcomes — success:%-5d dry-run:%-5d "
         "load-err:%-5d open-err:%-5d db-err:%-5d\n",
-        is.outcome_counts[OUTCOME_SUCCESS], is.outcome_counts[OUTCOME_DRYRUN], is.outcome_counts[OUTCOME_LOAD_ERROR],
-        is.outcome_counts[OUTCOME_OPEN_ERROR], is.outcome_counts[OUTCOME_DB_ERROR]);
+        indexerState.outcome_counts[OUTCOME_SUCCESS], indexerState.outcome_counts[OUTCOME_DRYRUN],
+        indexerState.outcome_counts[OUTCOME_LOAD_ERROR],
+        indexerState.outcome_counts[OUTCOME_OPEN_ERROR],
+        indexerState.outcome_counts[OUTCOME_DB_ERROR]);
 
     return !cancelled;
 }

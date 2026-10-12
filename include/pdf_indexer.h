@@ -17,8 +17,9 @@ extern "C" {
 
 // Walk the root_dir and insert all PDF pages into the database.
 // If a page is empty or has fewer pages than min_pages, it is skipped.
+// If filename is not NULL, it is read and indexed instead of directory traversal.
 // This can be used to filter out small PDF that are not books.
-bool process_pdfs(const char* root_dir, int min_pages, bool dryrun);
+bool process_pdfs(const char* root_dir, const char* filename, int min_pages, bool dryrun);
 
 #ifdef __cplusplus
 }

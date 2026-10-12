@@ -15,6 +15,7 @@ typedef struct {
     char* bind_addr;     // Address to bind to. Default is NULL (0.0.0.0)
     char* pgconn;        // postgres connection string.
     char* root_dir;      // Root Dir of PDFs to index.
+    char* filename;      // Index one file instead of directory traversal.
     char* frontend_dir;  // Directory with build assets
     int port;            // Server port.
     int min_pages;       // Minimum number of pages in a PDF to be indexable. Default is 4
@@ -69,7 +70,8 @@ static void cli_build_pdf_index(void* user_data) {
     if (!vfs && !appcfg->root_dir) {
         LOG_FATAL("--root directory must be provided when not using a VFS");
     }
-    process_pdfs(appcfg->root_dir, appcfg->min_pages, appcfg->dryrun);
+
+    process_pdfs(appcfg->root_dir, appcfg->filename, appcfg->min_pages, appcfg->dryrun);
     puts("PDF indexing completed successfully");
 }
 
@@ -91,12 +93,12 @@ int main(int argc, char* argv[]) {
     srand(time(NULL));
     pdf_library_init();
     load_dotenv(".env");
+
     ensure_valid_pgconn_string();
     root = flag_parser_new("lexicon", "Fast PDF indexer and server");
     defer_call1(flag_parser_free, root);
 
-    // root and/or root flags should be registered as persistent so that they are available to all
-    // subcommands.
+    // Register persistent flags that are available to all subcommands.
     flag_persistent_string(root, "vfs", 'v', "Path to Virtual File System image (.vfs)",
                            &config.vfs_path);
     flag_persistent_string(root, "root", 'r', "Root directory of pdfs", &config.root_dir);
@@ -111,6 +113,8 @@ int main(int argc, char* argv[]) {
     idxcmd = flag_add_subcommand(root, "index", "Build PDF index into the db", cli_build_pdf_index);
     flag_int(idxcmd, "min_pages", 'p', "Minimum number of pages in PDF", &config.min_pages);
     flag_bool(idxcmd, "dryrun", 'r', "Perform dry-run without commiting changes", &config.dryrun);
+    flag_string(idxcmd, "filename", 'f', "Index a single file instead of directory traversal",
+                &config.filename);
 
     // Before the matching subcommand runs, we need to connect to the database.
     flag_set_pre_invoke(root, cli_pre_exec_handler);

@@ -18,7 +18,9 @@ static char* serialize_doc(yyjson_mut_doc* doc, yyjson_alc* alc, size_t* out_len
     char* json_str = yyjson_mut_write_opts(doc, 0, alc, &len, NULL);
     yyjson_mut_doc_free(doc);
 
-    if (out_len) { *out_len = len; }
+    if (out_len) {
+        *out_len = len;
+    }
     return json_str;
 }
 
@@ -52,7 +54,8 @@ char* json_create_error(yyjson_alc* alc, const char* msg, size_t* out_len) {
  * @param text     Page text content. Falls back to "" if NULL.
  * @return         StrSlice pointing into the serialized JSON string.
  */
-StrSlice json_create_page_response(yyjson_alc* alc, int64_t file_id, int page_num, const char* text) {
+StrSlice json_create_page_response(yyjson_alc* alc, int64_t file_id, int page_num,
+                                   const char* text) {
     yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -78,8 +81,8 @@ StrSlice json_create_page_response(yyjson_alc* alc, int64_t file_id, int page_nu
  * @param out_len   Set to the byte length of the returned string. May be NULL.
  * @return          JSON string. Lifetime governed by @p alc.
  */
-char* json_create_file_response(yyjson_alc* alc, int64_t id, const char* name, const char* path, int64_t num_pages,
-                                size_t* out_len) {
+char* json_create_file_response(yyjson_alc* alc, int64_t id, const char* name, const char* path,
+                                int64_t num_pages, size_t* out_len) {
     yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -133,7 +136,8 @@ static void add_file_results(yyjson_mut_doc* doc, yyjson_mut_val* results_array,
     }
 }
 
-char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit, int64_t total_count, size_t* out_len) {
+char* json_create_file_list(yyjson_alc* alc, PGresult* res, int page, int limit,
+                            int64_t total_count, size_t* out_len) {
     yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -184,7 +188,8 @@ char* json_create_book_list(yyjson_alc* alc, PGresult* res, size_t* out_len) {
  * @param out_len Set to the byte length of the returned string. May be NULL.
  * @return        JSON string. Lifetime governed by @p alc.
  */
-char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* query, size_t* out_len) {
+char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* query,
+                                 size_t* out_len) {
     yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
@@ -223,9 +228,7 @@ char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* que
 }
 
 /** Rounds a value to 2 decimal places to shrink JSON output size. */
-static inline double round2(double v) {
-    return round(v * 100.0) / 100.0;
-}
+static inline double round2(double v) { return round(v * 100.0) / 100.0; }
 /**
  * Builds a JSON text-layer object from per-character boxes.
  *
@@ -237,8 +240,8 @@ static inline double round2(double v) {
  * @param out_len     Set to the byte length of the returned string. May be NULL.
  * @return            JSON string. Lifetime governed by @p alc.
  */
-char* json_create_text_layer(yyjson_alc* alc, float page_width, float page_height, const pdf_char_box_t* boxes,
-                             int count, size_t* out_len) {
+char* json_create_text_layer(yyjson_alc* alc, float page_width, float page_height,
+                             const pdf_char_box_t* boxes, int count, size_t* out_len) {
     yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
