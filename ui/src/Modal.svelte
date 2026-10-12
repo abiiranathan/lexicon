@@ -25,6 +25,15 @@
   let containerElement = $state<HTMLDivElement | null>(null);
   let imageLoaded = $state(false);
   let loadedImage = $state<HTMLImageElement | null>(null);
+  type AnnotationPoint = { x: number; y: number };
+  type AnnotationStroke = {
+    points: AnnotationPoint[];
+    width: number;
+  };
+  let annotations = $state<Record<string, AnnotationStroke[]>>({});
+  let annotationMode = $state(false);
+  let activeAnnotationStroke: AnnotationStroke | null = null;
+  let annotationStartY = 0;
 
   // Text layer state
   let renderTextSetting = useLocalStorage("render-text", true);
@@ -197,7 +206,104 @@
     const dh = swapped ? drawWidth : drawHeight;
     ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
 
+    const key = getAnnotationKey();
+    const strokes = key ? annotations[key] ?? [] : [];
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#e11d48";
+    for (const stroke of strokes) {
+      if (stroke.points.length === 0) continue;
+      ctx.beginPath();
+      ctx.lineWidth = stroke.width;
+      if (stroke.points.length === 1) {
+        const point = stroke.points[0];
+        ctx.arc(
+          (point.x / img.width) * dw - dw / 2,
+          (point.y / img.height) * dh - dh / 2,
+          stroke.width / 2,
+          0,
+          2 * Math.PI,
+        );
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fill();
+        continue;
+      }
+      ctx.moveTo(
+        (stroke.points[0].x / img.width) * dw - dw / 2,
+        (stroke.points[0].y / img.height) * dh - dh / 2,
+      );
+      for (const point of stroke.points.slice(1)) {
+        ctx.lineTo(
+          (point.x / img.width) * dw - dw / 2,
+          (point.y / img.height) * dh - dh / 2,
+        );
+      }
+      ctx.stroke();
+    }
+
     ctx.restore();
+  }
+
+  function getAnnotationKey(): string | null {
+    return modalContent
+      ? `${modalContent.file_id}:${modalContent.page}`
+      : null;
+  }
+
+  function getCanvasPoint(
+    clientX: number,
+    clientY: number,
+    lockY?: number,
+  ): {
+    canvasX: number;
+    canvasY: number;
+    imageX: number;
+    imageY: number;
+    imageUnitsPerPixel: number;
+  } | null {
+    if (!canvasElement || !containerElement || !loadedImage) return null;
+
+    const rect = canvasElement.getBoundingClientRect();
+    const canvasX = clientX - rect.left;
+    const canvasY = (lockY ?? clientY) - rect.top;
+    const img = loadedImage;
+    const imgW = isLandscapeRotation ? img.height : img.width;
+    const imgH = isLandscapeRotation ? img.width : img.height;
+    const imgAspect = imgW / imgH;
+    const cssWidth = rect.width;
+    const cssHeight = rect.height;
+    const containerAspect = cssWidth / cssHeight;
+    const drawWidth =
+      viewMode === "scroll"
+        ? cssWidth
+        : imgAspect > containerAspect
+          ? cssWidth
+          : cssHeight * imgAspect;
+    const drawHeight =
+      viewMode === "scroll"
+        ? cssHeight
+        : imgAspect > containerAspect
+          ? cssWidth / imgAspect
+          : cssHeight;
+    const dw = isLandscapeRotation ? drawHeight : drawWidth;
+    const dh = isLandscapeRotation ? drawWidth : drawHeight;
+    const cx = cssWidth / 2;
+    const cy = cssHeight / 2;
+    const pointX =
+      viewMode === "fit" ? (canvasX - cx) / scale - translateX : canvasX - cx;
+    const pointY =
+      viewMode === "fit" ? (canvasY - cy) / scale - translateY : canvasY - cy;
+    const rad = (-rotation * Math.PI) / 180;
+    const rotatedX = pointX * Math.cos(rad) - pointY * Math.sin(rad);
+    const rotatedY = pointX * Math.sin(rad) + pointY * Math.cos(rad);
+
+    return {
+      canvasX,
+      canvasY,
+      imageX: (rotatedX / dw + 0.5) * img.width,
+      imageY: (rotatedY / dh + 0.5) * img.height,
+      imageUnitsPerPixel: img.width / dw,
+    };
   }
 
   function renderCanvas(): void {
@@ -278,6 +384,7 @@
     const img = new Image();
 
     img.onload = () => {
+      activeAnnotationStroke = null;
       loadedImage = img;
       imageLoaded = true;
       URL.revokeObjectURL(url);
@@ -321,7 +428,75 @@
     scale = Math.max(0.5, Math.min(5, scale - e.deltaY * 0.001));
   }
 
+  function handlePointerDown(e: PointerEvent): void {
+    if (!annotationMode || !e.isPrimary || e.button !== 0) return;
+    const point = getCanvasPoint(e.clientX, e.clientY);
+    const key = getAnnotationKey();
+    const img = loadedImage;
+    if (
+      !point ||
+      !key ||
+      !img ||
+      point.imageX < 0 ||
+      point.imageY < 0 ||
+      point.imageX > img.width ||
+      point.imageY > img.height
+    ) {
+      return;
+    }
+
+    e.preventDefault();
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    const stroke: AnnotationStroke = {
+      points: [{ x: point.imageX, y: point.imageY }],
+      width: 3 * point.imageUnitsPerPixel,
+    };
+    annotations[key] = [...(annotations[key] ?? []), stroke];
+    activeAnnotationStroke = stroke;
+    annotationStartY = e.clientY;
+    renderCanvas();
+  }
+
+  function handlePointerMove(e: PointerEvent): void {
+    if (!annotationMode || !activeAnnotationStroke) return;
+    const point = getCanvasPoint(
+      e.clientX,
+      e.clientY,
+      e.shiftKey ? annotationStartY : undefined,
+    );
+    const img = loadedImage;
+    const key = getAnnotationKey();
+    if (!point || !img || !key) return;
+
+    const strokes = annotations[key];
+    const stroke = strokes?.[strokes.length - 1];
+    if (!stroke) return;
+    const last = stroke.points.at(-1);
+    const nextPoint = {
+      x: Math.max(0, Math.min(img.width, point.imageX)),
+      y: Math.max(0, Math.min(img.height, point.imageY)),
+    };
+    if (
+      !last ||
+      Math.hypot(nextPoint.x - last.x, nextPoint.y - last.y) >= 1
+    ) {
+      stroke.points = [...stroke.points, nextPoint];
+      renderCanvas();
+    }
+  }
+
+  function handlePointerUp(e: PointerEvent): void {
+    if (activeAnnotationStroke) {
+      activeAnnotationStroke = null;
+      const target = e.currentTarget as HTMLDivElement;
+      if (target.hasPointerCapture(e.pointerId)) {
+        target.releasePointerCapture(e.pointerId);
+      }
+    }
+  }
+
   function handleMouseDown(e: MouseEvent): void {
+    if (annotationMode) return;
     if (viewMode !== "fit") return;
     isDragging = true;
     dragStartX = e.clientX - translateX;
@@ -329,7 +504,7 @@
   }
 
   function handleMouseMove(e: MouseEvent): void {
-    if (viewMode !== "fit" || !isDragging) return;
+    if (annotationMode || viewMode !== "fit" || !isDragging) return;
     translateX = e.clientX - dragStartX;
     translateY = e.clientY - dragStartY;
   }
@@ -339,6 +514,7 @@
   }
 
   function handleTouchStart(e: TouchEvent): void {
+    if (annotationMode) return;
     if (viewMode !== "fit") return;
 
     if (e.touches.length === 2) {
@@ -355,6 +531,7 @@
   }
 
   function handleTouchMove(e: TouchEvent): void {
+    if (annotationMode) return;
     if (viewMode !== "fit") return;
 
     if (e.touches.length === 2) {
@@ -395,6 +572,14 @@
 
   function rotateImage(): void {
     rotation = (rotation + 90) % 360;
+  }
+
+  function undoAnnotation(): void {
+    const key = getAnnotationKey();
+    if (!key) return;
+    annotations[key]?.pop();
+    activeAnnotationStroke = null;
+    renderCanvas();
   }
 
   // Keyboard shortcuts
@@ -874,6 +1059,39 @@
 
         <!-- Right: search + close -->
         <div class="header-right">
+          {#if imageLoaded}
+            <button
+              class="icon-btn annotation-toggle"
+              class:icon-btn--active={annotationMode}
+              onclick={() => {
+                annotationMode = !annotationMode;
+                activeAnnotationStroke = null;
+              }}
+              aria-pressed={annotationMode}
+              aria-label={annotationMode
+                ? "Stop annotating"
+                : "Annotate page"}
+              title={annotationMode
+                ? "Stop annotating"
+                : "Annotate page (hold Shift while drawing for a horizontal line)"}
+              type="button"
+            >
+              A
+            </button>
+            {#if annotationMode}
+              <button
+                class="icon-btn annotation-undo"
+                onclick={undoAnnotation}
+                disabled={(annotations[getAnnotationKey() ?? ""] ?? []).length === 0}
+                aria-label="Undo last annotation stroke"
+                title="Undo last stroke"
+                type="button"
+              >
+                Undo
+              </button>
+            {/if}
+          {/if}
+
           <!-- In-document search widget -->
           <div class="search-wrapper" class:mobile-active={showMobileSearch}>
             <div class="search-field-wrap">
@@ -1081,6 +1299,10 @@
             class:scroll-mode={viewMode === "scroll"}
             bind:this={containerElement}
             onwheel={handleWheel}
+            onpointerdown={handlePointerDown}
+            onpointermove={handlePointerMove}
+            onpointerup={handlePointerUp}
+            onpointercancel={handlePointerUp}
             onmousedown={handleMouseDown}
             onmousemove={handleMouseMove}
             onmouseup={handleMouseUp}
@@ -1092,6 +1314,7 @@
             <canvas
               bind:this={canvasElement}
               class="page-canvas"
+              class:annotation-mode={annotationMode}
               class:dragging={isDragging}
               class:fit-mode={viewMode === "fit"}
             ></canvas>
@@ -1102,9 +1325,8 @@
               </div>
             {/if}
           </div>
-
           <!-- Reconstructed Plain Text View Overlay -->
-          {#if renderTextSetting.value && pageText}
+          {#if renderTextSetting.value && pageText && !annotationMode}
             <div class="plain-text-container">
               <div class="plain-text-header">
                 <span class="plain-text-title"
@@ -1695,6 +1917,20 @@
   }
   .page-canvas.fit-mode:not(.dragging) {
     cursor: grab;
+  }
+  .page-canvas.annotation-mode,
+  .page-canvas.fit-mode.annotation-mode {
+    cursor: crosshair;
+  }
+
+  .annotation-toggle {
+    min-width: 2rem;
+    font-size: 0.9rem;
+    font-weight: 700;
+  }
+
+  .annotation-undo {
+    font-size: 0.75rem;
   }
 
   /* ── Plain Text Overlay Panel ── */
