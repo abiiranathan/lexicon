@@ -125,6 +125,11 @@ int main(int argc, char* argv[]) {
         LOG_FATAL("Failed to parse command line arguments: %s", flag_status_str(status));
     }
 
+    // If a subcommand was invoked, we are done. Otherwise, start the server.
+    if (flag_handler_was_invoked(flag_active_subcommand(root))) {
+        exit(EXIT_SUCCESS);
+    }
+
     if (!is_dir(config.frontend_dir)) {
         LOG_FATAL("Frontend build directory does not exist: %s", config.frontend_dir);
     }
