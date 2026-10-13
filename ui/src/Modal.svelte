@@ -74,8 +74,139 @@
       line.words.sort((a, b) => a.l - b.l);
     }
 
+    // Column cuts are detected on the original geometry below (cutLines):
+    // removing markers first would merge the neighbouring gaps into wide
+    // phantom gutters that forge false cuts, split a column mid-row and
+    // scramble DOM order — lower rows then highlight while selecting row 1.
+    const cutLines = lines.map((l) => ({
+      top: l.top,
+      bottom: l.bottom,
+      words: [...l.words],
+    }));
+
+    // Ignore super/subscript words (e.g. citation numerals like 12, 13–18
+    // or 5,19,23–41): left in place they split into stray lines that break
+    // the margin-stacked layout and push following lines out of position, so
+    // the next line's selection highlight is no longer shown (the text itself
+    // is still selected), and they pollute copied text. A word is
+    // super/subscript when it sits off the row baseline (raised or lowered),
+    // at any size: markers are often full-size but raised, and clusters like
+    // 5,19,23–41 defeat a pure size test because comma tails dip back down
+    // to the baseline. Citation-shaped tokens (digits with , ; : . - – —
+    // brackets) therefore get a strict box test, while baseline-aligned
+    // numbers (19 patients, 1,000, table rows, B12) are kept.
+    const BASE_RATIO = 0.25;
+    const NARROW_RATIO = 0.25;
+    const CITE_RE = /^[\d,;:.·\-–—\[\]()]*\d[\d,;:.·\-–—\[\]()]*$/;
+    const lowerMedian = (values: number[]): number => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return sorted[(sorted.length - 1) >> 1];
+    };
+    type LayerWord = TextLayerResult["words"][number];
+    // Geometry reference for a row: plain (non-citation) words, so marker
+    // boxes cannot poison the baseline — unless plain is only small
+    // punctuation (e.g. a lone dash), in which case fall back to all words.
+    const statsOf = (ws: LayerWord[]): {
+      maxH: number;
+      baseline: number;
+      rowTop: number;
+    } => {
+      const plain = ws.filter((w) => !CITE_RE.test(w.text));
+      const lineMaxH = Math.max(...ws.map((w) => w.t - w.b));
+      const ref =
+        plain.length > 0 &&
+        Math.max(...plain.map((w) => w.t - w.b)) >= lineMaxH * 0.5
+          ? plain
+          : ws;
+      const maxH = Math.max(...ref.map((w) => w.t - w.b));
+      const tall = ref.filter(
+        (w) => !(maxH > 0 && w.t - w.b < maxH * 0.7),
+      );
+      const use = tall.length > 0 ? tall : ref;
+      return {
+        maxH,
+        baseline: lowerMedian(use.map((w) => w.b)),
+        rowTop: lowerMedian(use.map((w) => w.t)),
+      };
+    };
+    const bands = lines.map((l) => ({ top: l.top, bottom: l.bottom }));
+
+    lines.forEach((line, index) => {
+      const st = statsOf(line.words);
+      const limit = st.maxH * BASE_RATIO;
+      const hasPlain = line.words.some((w) => !CITE_RE.test(w.text));
+      line.words = line.words.filter((w) => {
+        if (!CITE_RE.test(w.text) || !hasPlain) {
+          // Body text: bottom rests on the baseline; below it only with a
+          // normal top (descenders); centred punctuation straddling the
+          // baseline is kept too.
+          return (
+            (w.b <= st.baseline + limit && w.b >= st.baseline - limit) ||
+            w.t >= st.rowTop - limit ||
+            (w.b < st.baseline + limit && w.t > st.baseline - limit)
+          );
+        }
+        // Citation candidate: keep only when the box sits exactly on the
+        // row geometry (top may be short for small digits, but the bottom
+        // must rest on the baseline — comma tails dipping down fail this).
+        const h = w.t - w.b;
+        const bOk = w.b <= st.baseline + limit && w.b >= st.baseline - limit;
+        const tOk = w.t <= st.rowTop + limit && w.t >= st.rowTop - limit;
+        return bOk && (tOk || !(st.maxH > 0 && h >= st.maxH * 0.7));
+      });
+
+      // Narrow debris lines (stray markers that grouped alone): drop them
+      // when they strictly overlap a neighbouring row yet sit off its
+      // baseline (this overlap is what breaks the layout), or when they are
+      // small floaters just above a row (raised sup). Full-width rows,
+      // touching-but-aligned rows (punctuation), distant small rows
+      // (footnotes) and tight neighbouring rows are kept.
+      const neighbourIndexes: number[] = [];
+      if (index > 0) neighbourIndexes.push(index - 1);
+      if (index < lines.length - 1) neighbourIndexes.push(index + 1);
+      const ownH =
+        line.words.length > 0
+          ? Math.max(...line.words.map((w) => w.t - w.b))
+          : 0;
+      const lineWidth =
+        line.words.length > 0
+          ? Math.max(...line.words.map((w) => w.r)) - line.words[0].l
+          : 0;
+      if (line.words.length > 0 && lineWidth < pageWidth * NARROW_RATIO) {
+        let refH = 0;
+        for (const j of neighbourIndexes)
+          refH = Math.max(refH, statsOf(lines[j].words).maxH);
+        const smallLine = refH > 0 && ownH < refH * 0.7;
+        for (const j of neighbourIndexes) {
+          if (lines[j].words.length === 0) continue;
+          const band = bands[j];
+          const nst = statsOf(lines[j].words);
+          const nLimit = nst.maxH * BASE_RATIO;
+          const raised = line.bottom > nst.baseline + nLimit;
+          const lowered = line.bottom < nst.baseline - nLimit;
+          const overlaps = line.top > band.bottom && line.bottom < band.top;
+          const dAbove = line.bottom - band.top;
+          const nearAbove = dAbove > 0 && dAbove <= ownH * 0.5;
+          if (
+            (overlaps && (raised || lowered)) ||
+            (smallLine && nearAbove && raised)
+          ) {
+            line.words = [];
+            break;
+          }
+        }
+      }
+      if (line.words.length > 0) {
+        line.top = Math.max(...line.words.map((w) => w.t));
+        line.bottom = Math.min(...line.words.map((w) => w.b));
+      }
+    });
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].words.length === 0) lines.splice(i, 1);
+    }
+
     const gapCandidates: { center: number; lineIndex: number }[] = [];
-    lines.forEach((line, lineIndex) => {
+    cutLines.forEach((line, lineIndex) => {
       for (let index = 1; index < line.words.length; index++) {
         const previous = line.words[index - 1];
         const current = line.words[index];
@@ -116,7 +247,7 @@
       }
     }
 
-    const minimumColumnLines = Math.max(3, Math.ceil(lines.length * 0.15));
+    const minimumColumnLines = Math.max(3, Math.ceil(cutLines.length * 0.15));
     const columnCuts = candidateGroups
       .filter((group) => group.lineIndexes.size >= minimumColumnLines)
       .map((group) => group.center)
@@ -518,7 +649,8 @@
     if (!layout) return "";
     const gapWidth = selectableWordGapWidth(line, index);
     if (gapWidth <= 0) return "display:none;";
-    const height = ((line.top - line.bottom) / textLayer.height) * layout.height;
+    const height =
+      ((line.top - line.bottom) / textLayer.height) * layout.height;
     const fontSize = Math.max(1, height);
     textMeasureContext ??= document.createElement("canvas").getContext("2d");
     let letterSpacing = 0;
@@ -1851,12 +1983,11 @@
                         class="selectable-line"
                         style={selectableLineStyle(column, line, lineIndex)}
                       >
-                        {#each line.words as word, wordIndex (wordIndex)}{#if
-                          wordIndex > 0}<span
-                            class="selectable-gap"
-                            style={selectableGapStyle(line, wordIndex)}
-                            >{" "}</span
-                          >{/if}<span
+                        {#each line.words as word, wordIndex (wordIndex)}{#if wordIndex > 0}<span
+                              class="selectable-gap"
+                              style={selectableGapStyle(line, wordIndex)}
+                              >{" "}</span
+                            >{/if}<span
                             class="selectable-word"
                             data-text={word.text}
                             data-column={columnIndex}
