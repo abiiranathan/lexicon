@@ -4,6 +4,8 @@
   import SearchResults from "./SearchResults.svelte";
   import FilesList from "./FilesList.svelte";
   import Modal from "./Modal.svelte";
+  import Upload from "./Upload.svelte";
+  import { AuthState } from "./lib/auth.svelte";
 
   import "./app.css";
   import {
@@ -50,6 +52,7 @@
   let searchError = $state<string | null>(null);
   let filesError = $state<string | null>(null);
   let modalContent = $state<ModalContentType | null>(null);
+  const auth = new AuthState();
   let searchCache = $state(new Map());
   const maxCacheSize = 100;
   let searchTimeout: any;
@@ -59,6 +62,7 @@
 
   onMount(() => {
     loadFiles();
+    auth.refresh();
     handleSearch(searchQuery.value);
 
     const fileIdString = params.get("file");
@@ -200,6 +204,12 @@
     modalContent = null;
   }
 
+  function handleFileDeleted(fileId: number) {
+    if (modalContent?.file_id === fileId) handleModalClose();
+    searchCache.clear();
+    loadFiles();
+  }
+
   $effect(() => {
     return () => {
       clearTimeout(searchTimeout);
@@ -269,6 +279,42 @@
           aria-label="Increase scale">+</button
         >
       </div>
+
+      <div class="auth-controls">
+        {#if auth.loading}
+          <span class="library-count">…</span>
+        {:else if auth.user}
+          <span class="library-count" title={auth.user.email}>
+            {auth.user.email}{auth.user.is_admin ? " (admin)" : ""}
+          </span>
+          <button
+            type="button"
+            class="toggle-btn"
+            onclick={() => auth.logout()}
+          >
+            Sign out
+          </button>
+        {:else}
+          {#if auth.providers.google}
+            <button
+              type="button"
+              class="toggle-btn"
+              onclick={() => auth.login("google")}
+            >
+              Sign in with Google
+            </button>
+          {/if}
+          {#if auth.providers.github}
+            <button
+              type="button"
+              class="toggle-btn"
+              onclick={() => auth.login("github")}
+            >
+              Sign in with GitHub
+            </button>
+          {/if}
+        {/if}
+      </div>
     </div>
   </header>
 
@@ -297,6 +343,7 @@
         }}
       />
     {:else}
+      <Upload {auth} onUploaded={loadFiles} />
       <div class="files-controls">
         <input
           type="text"
@@ -315,6 +362,8 @@
         isLoading={isLoadingFiles}
         error={filesError}
         {viewPage}
+        {auth}
+        onDeleted={handleFileDeleted}
       />
     {/if}
   </section>

@@ -222,6 +222,12 @@ body {
   color: var(--text-secondary);
 }
 
+.auth-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
 .scale-control {
   display: flex;
   align-items: center;

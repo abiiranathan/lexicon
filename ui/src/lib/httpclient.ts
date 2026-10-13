@@ -75,3 +75,87 @@ export async function fetchPageText(
     const data: Page = await res.json();
     return data.text.replace(/^\uFEFF/, "").replace(/\uFFFE/g, "");
 }
+
+export type AuthUser = {
+    id: number;
+    email: string;
+    provider: string;
+    is_admin: boolean;
+};
+
+export type AuthProviders = {
+    google: boolean;
+    github: boolean;
+};
+
+export type UploadJob = {
+    job_id: number;
+    status: string;
+    filename: string;
+    total_bytes: number;
+    received_bytes: number;
+    file_id?: number;
+    error?: string;
+};
+
+// Session cookies require credentials on auth/upload calls. Public search
+// and render endpoints keep plain fetch so CORS wildcard keeps working.
+function authed(path: string, init?: RequestInit): Promise<Response> {
+    return fetch(`${baseURL}${path}`, { ...init, credentials: "include" });
+}
+
+async function authedJson<T>(path: string, init?: RequestInit): Promise<T> {
+    const res = await authed(path, init);
+    if (!res.ok) throw await extractError(res);
+    return res.json() as Promise<T>;
+}
+
+export function authProviders(): Promise<AuthProviders> {
+    return authedJson<AuthProviders>("/api/auth/providers");
+}
+
+export function authWhoami(): Promise<AuthUser> {
+    return authedJson<AuthUser>("/api/auth/whoami");
+}
+
+export function authLogout(): Promise<{ ok: boolean }> {
+    return authedJson<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
+}
+
+export function authLoginUrl(provider: "google" | "github"): string {
+    return `${baseURL}/api/auth/login/${provider}`;
+}
+
+export function uploadInit(
+    filename: string,
+    size_bytes: number,
+): Promise<UploadJob> {
+    return authedJson<UploadJob>("/api/admin/upload/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename, size_bytes }),
+    });
+}
+
+export function uploadChunkUrl(job_id: number, offset: number): string {
+    return `${baseURL}/api/admin/upload/chunk?job=${job_id}&offset=${offset}`;
+}
+
+export function uploadComplete(job_id: number): Promise<UploadJob> {
+    return authedJson<UploadJob>(`/api/admin/upload/complete?job=${job_id}`, {
+        method: "POST",
+    });
+}
+
+export function uploadJobStatus(job_id: number): Promise<UploadJob> {
+    return authedJson<UploadJob>(`/api/admin/upload/jobs/${job_id}`);
+}
+
+export function deleteFile(
+    fileId: number,
+): Promise<{ ok: boolean; file_id: number }> {
+    return authedJson<{ ok: boolean; file_id: number }>(
+        `/api/admin/files/${fileId}`,
+        { method: "DELETE" },
+    );
+}

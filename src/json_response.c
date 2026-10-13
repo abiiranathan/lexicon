@@ -1,6 +1,7 @@
 #include "../include/json_response.h"
 #include <math.h>
 #include "../include/database.h"
+#include "../include/json_allocator.h"
 
 /**
  * Serializes @p doc to JSON, frees the doc, and returns the output buffer.
@@ -369,4 +370,21 @@ char* json_create_text_layer_words(yyjson_alc* alc, float page_width, float page
     }
 
     return serialize_doc(doc, alc, out_len);
+}
+
+void send_json_error_status(PulsarConn* conn, http_status status, const char* msg) {
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
+
+    size_t outlen;
+    char* err_str = json_create_error(&alc, msg, &outlen);
+    if (err_str) {
+        conn_send_json(conn, status, err_str, outlen);
+    } else {
+        conn_send_json(conn, StatusInternalServerError, "{\"error\":\"Internal error\"}", 26);
+    }
+}
+
+void send_json_error(PulsarConn* conn, const char* msg) {
+    send_json_error_status(conn, StatusBadRequest, msg);
 }

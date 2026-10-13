@@ -11,6 +11,8 @@ set(SERVER_WORKERS "2" CACHE STRING "Number of server worker threads")
 find_package(PkgConfig REQUIRED)
 find_package(PostgreSQL REQUIRED)
 find_package(lexicon-pdf REQUIRED)
+find_package(CURL REQUIRED)
+find_package(OpenSSL REQUIRED)
 pkg_check_modules(TESSERACT REQUIRED IMPORTED_TARGET tesseract)
 
 # The executable needs ./ui/dist svelte frontend served at / route.
@@ -18,11 +20,14 @@ pkg_check_modules(TESSERACT REQUIRED IMPORTED_TARGET tesseract)
 add_executable(${PROJECT_NAME} 
     src/main.c 
     src/routes.c 
+    src/auth.c
+    src/upload.c
     src/ocr.c
     src/pdf_indexer.c
     src/database.c
     src/json_response.c
     src/json_allocator.c
+    src/vfs_store.c
 )
 
 # All dependencies from abiiranathan can be built from source with cmake
@@ -33,7 +38,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     pulsar           # github.com/abiiranathan/pulsar     (Robust epoll-based web server)
     lexicon::pdf     # github.com/abiiranathan/lexicon-pdf     (Robust epoll-based web server)
     PkgConfig::TESSERACT # Tesseract OCR and Leptonica
-    yyjson           # https://github.com/ibireme/yyjson  (Json serializer and parser)
+    CURL::libcurl        # OAuth token exchange + userinfo (GitHub/Google)
+    OpenSSL::Crypto      # SHA-256 (PKCE challenges, session token hashes)
+    yyjson               # https://github.com/ibireme/yyjson  (Json serializer and parser)
     m                # libmath
     ${PostgreSQL_LIBRARIES}
 )

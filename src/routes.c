@@ -1,18 +1,23 @@
+#include <errno.h>
 #include <lexicon/lexicon_pdf.h>
 #include <malloc.h>
 #include <math.h>
 #include <pulsar/error.h>
 #include <solidc/defer.h>
 #include <solidc/str_to_num.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 #include <vfs.h>
 
+#include "../include/auth.h"
 #include "../include/database.h"
 #include "../include/error_macros.h"
 #include "../include/json_response.h"
 #include "../include/ocr.h"
 #include "../include/routes.h"
-
-extern vfs_t* vfs;  // Instance of VFS defined in main.c.
+#include "../include/upload.h"
+#include "../include/vfs_store.h"
 
 #define handle_record_not_found(res, conn, errmsg) require_row((res), (conn), (errmsg))
 
@@ -27,9 +32,9 @@ extern vfs_t* vfs;  // Instance of VFS defined in main.c.
  */
 bool gen_open_document(pdf_document_t* doc, const char* path, int* num_pages, void** vfs_data) {
     pdf_status_t status = PDF_OK;
-    if (vfs != NULL) {
+    if (vfs_store_active()) {
         size_t size = 0;
-        *vfs_data = vfs_read_file(vfs, path, &size);
+        *vfs_data = vfs_store_read_file(path, &size);
         if (!*vfs_data) return false;
         // takes ownership of the data but must be freed after pdf_document_close.
         status = pdf_document_open_mem(doc, *vfs_data, size, NULL);
@@ -42,29 +47,6 @@ bool gen_open_document(pdf_document_t* doc, const char* path, int* num_pages, vo
         return true;
     }
     return false;
-}
-
-/**
- * Sends a JSON-encoded error body using the requested HTTP status.
- *
- * @param conn PulsarConn to write the response to.
- * @param msg  Human-readable error message; must be NUL-terminated.
- */
-static inline void send_json_error_status(PulsarConn* conn, http_status status, const char* msg) {
-    yyjson_alc alc;
-    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
-
-    size_t outlen;
-    char* err_str = json_create_error(&alc, msg, &outlen);
-    if (err_str) {
-        conn_send_json(conn, status, err_str, outlen);
-    } else {
-        conn_send_json(conn, StatusInternalServerError, "{\"error\":\"Internal error\"}", 26);
-    }
-}
-
-static inline void send_json_error(PulsarConn* conn, const char* msg) {
-    send_json_error_status(conn, StatusBadRequest, msg);
 }
 
 /**
@@ -571,4 +553,87 @@ void get_file_by_id(PulsarCtx* ctx) {
     static const char* headers = "Cache-Control: public, max-age=86400\r\n";
     conn_writeheader_raw(conn, headers, strlen(headers));
     conn_send_json(conn, StatusOK, json_str, jsonlen);
+}
+
+/**
+ * DELETE /api/admin/files/{file_id} (admin only).
+ *
+ * Removes the file record (pages and cached OCR follow via foreign keys)
+ * and deletes the underlying PDF: from disk in host mode, from the image
+ * (with a handle swap so readers stop seeing it) in VFS mode.
+ */
+void delete_file(PulsarCtx* ctx) {
+    PulsarConn* conn = ctx->conn;
+    int64_t admin_id = 0;
+    if (!auth_require_admin(conn, &admin_id)) return;
+    (void)admin_id;
+
+    require_path_param_i64(file_id, conn, "file_id");
+    if (file_id < 1) {
+        send_json_error_status(conn, StatusBadRequest, "invalid file id");
+        return;
+    }
+
+    acquire_db(db);
+
+    static const char* query = "SELECT path FROM files WHERE id = $1 LIMIT 1";
+    const char* params[] = {file_id_str};
+    run_query(res, db, query, 1, params);
+    require_row(res, conn, "No book matches the requested ID");
+    char path[4096];
+    snprintf(path, sizeof(path), "%s", PQgetvalue(res, 0, 0));
+    if (path[0] == '\0' || strstr(path, "..")) {
+        send_json_error_status(conn, StatusBadRequest, "stored file path is invalid");
+        return;
+    }
+
+    static const char* delete_query = "DELETE FROM files WHERE id = $1";
+    run_query(delete_res, db, delete_query, 1, params);
+    if (strcmp(PQcmdTuples(delete_res), "1") != 0) {
+        send_json_error_status(conn, StatusInternalServerError, "failed to delete file record");
+        return;
+    }
+
+    const char* image = app_vfs_path();
+    if (image && *image) {
+        vfs_t* writer = NULL;
+        if (vfs_open(image, false, &writer) != VFS_OK || !writer) {
+            fprintf(stderr, "delete_file: cannot open VFS image for writing\n");
+        } else {
+            if (vfs_unlink(writer, path) != VFS_OK) {
+                fprintf(stderr, "delete_file: cannot unlink %s from VFS image\n", path);
+            }
+            vfs_close(writer);
+        }
+        vfs_t* fresh = NULL;
+        if (vfs_open(image, true, &fresh) != VFS_OK || !fresh) {
+            fprintf(stderr, "delete_file: cannot reopen VFS image\n");
+        } else if (!vfs_store_replace(fresh)) {
+            vfs_close(fresh);
+        }
+    } else {
+        if (unlink(path) != 0 && errno != ENOENT) {
+            fprintf(stderr, "delete_file: cannot unlink %s: %s\n", path, strerror(errno));
+        }
+    }
+
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
+    yyjson_mut_doc* doc = yyjson_mut_doc_new(&alc);
+    if (!doc) {
+        send_json_error_status(conn, StatusInternalServerError, "failed to serialize response");
+        return;
+    }
+    yyjson_mut_val* root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_bool(doc, root, "ok", true);
+    yyjson_mut_obj_add_int(doc, root, "file_id", file_id);
+    size_t out_len = 0;
+    char* json = yyjson_mut_write_opts(doc, 0, &alc, &out_len, NULL);
+    yyjson_mut_doc_free(doc);
+    if (!json) {
+        send_json_error_status(conn, StatusInternalServerError, "failed to serialize response");
+        return;
+    }
+    conn_send_json(conn, StatusOK, json, out_len);
 }

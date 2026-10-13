@@ -25,6 +25,55 @@ static const char* schemas[] = {
     "    PRIMARY KEY (file_id, page_num)"
     ")",
 
+    // OAuth users. is_admin is derived from the ADMIN_EMAILS allowlist at
+    // login time; the allowlist stays the source of truth.
+    "CREATE TABLE IF NOT EXISTS users ("
+    "    id BIGSERIAL NOT NULL PRIMARY KEY, "
+    "    provider TEXT NOT NULL, "
+    "    provider_sub TEXT NOT NULL, "
+    "    email TEXT NOT NULL, "
+    "    is_admin BOOLEAN NOT NULL DEFAULT FALSE, "
+    "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
+    "    last_login_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
+    "    UNIQUE(provider, provider_sub)"
+    ")",
+
+    // Opaque session tokens: only SHA-256 hex digests are stored.
+    "CREATE TABLE IF NOT EXISTS sessions ("
+    "    token_hash TEXT NOT NULL PRIMARY KEY, "
+    "    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, "
+    "    expires_at TIMESTAMPTZ NOT NULL"
+    ")",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+
+    // Single-use OAuth state/nonce values (CSRF protection).
+    "CREATE TABLE IF NOT EXISTS oauth_states ("
+    "    state TEXT NOT NULL PRIMARY KEY, "
+    "    provider TEXT NOT NULL, "
+    "    code_verifier TEXT NOT NULL, "
+    "    expires_at TIMESTAMPTZ NOT NULL"
+    ")",
+
+    // Chunked PDF upload jobs processed by a background worker.
+    "CREATE TABLE IF NOT EXISTS upload_jobs ("
+    "    id BIGSERIAL NOT NULL PRIMARY KEY, "
+    "    filename TEXT NOT NULL, "
+    "    staged_path TEXT NOT NULL, "
+    "    final_path TEXT, "
+    "    total_bytes BIGINT NOT NULL, "
+    "    received_bytes BIGINT NOT NULL DEFAULT 0, "
+    "    status TEXT NOT NULL DEFAULT 'uploading', "
+    "    error TEXT, "
+    "    file_id BIGINT REFERENCES files(id) ON DELETE SET NULL, "
+    "    created_by BIGINT REFERENCES users(id) ON DELETE SET NULL, "
+    "    created_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
+    "    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
+    ")",
+
+    // VFS destination for uploads into images (NULL for host-filesystem
+    // uploads). ADD COLUMN IF NOT EXISTS keeps existing tables working.
+    "ALTER TABLE upload_jobs ADD COLUMN IF NOT EXISTS vfs_path TEXT",
+
     // Create Pages as partitioned table (hash on file_id)
     "CREATE TABLE IF NOT EXISTS pages ("
     "    id BIGSERIAL, "
@@ -38,8 +87,7 @@ static const char* schemas[] = {
 
     // Create 10 partitions
     "CREATE TABLE IF NOT EXISTS pages_p0 PARTITION OF pages FOR VALUES WITH (MODULUS 10, REMAINDER "
-    "0)",
-    "CREATE TABLE IF NOT EXISTS pages_p1 PARTITION OF pages FOR VALUES WITH (MODULUS 10, REMAINDER "
+    "0)",    "CREATE TABLE IF NOT EXISTS pages_p1 PARTITION OF pages FOR VALUES WITH (MODULUS 10, REMAINDER "
     "1)",
     "CREATE TABLE IF NOT EXISTS pages_p2 PARTITION OF pages FOR VALUES WITH (MODULUS 10, REMAINDER "
     "2)",

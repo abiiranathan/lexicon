@@ -3,7 +3,9 @@
 
 #include <lexicon/lexicon_pdf.h>
 #include <libpq-fe.h>  // For PGresult
+#include <pgpool/pgpool.h>
 #include <pgpool/pgtypes.h>
+#include <pulsar/pulsar.h>
 #include <solidc/str_slice.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -121,5 +123,22 @@ char* json_create_text_layer(yyjson_alc* alc, float page_width, float page_heigh
                              int count, size_t* out_len);
 char* json_create_text_layer_words(yyjson_alc* alc, float page_width, float page_height,
                                    const text_word_t* words, int count, size_t* out_len);
+
+/**
+ * Sends a JSON-encoded error body using the requested HTTP status.
+ *
+ * @param conn PulsarConn to write the response to.
+ * @param status HTTP status for the response.
+ * @param msg  Human-readable error message; must be NUL-terminated.
+ */
+void send_json_error_status(PulsarConn* conn, http_status status, const char* msg);
+
+/**
+ * Sends a JSON-encoded error body with status 400 Bad Request.
+ *
+ * @param conn PulsarConn to write the response to.
+ * @param msg  Human-readable error message; must be NUL-terminated.
+ */
+void send_json_error(PulsarConn* conn, const char* msg);
 
 #endif  // JSON_RESPONSES_H

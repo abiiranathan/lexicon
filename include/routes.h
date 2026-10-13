@@ -59,6 +59,15 @@ void list_books(PulsarCtx* ctx);
 /** Retrieves a single file by its ID. */
 void get_file_by_id(PulsarCtx* ctx);
 
+/**
+ * DELETE /api/admin/files/{file_id} (admin only).
+ *
+ * Removes the file record (pages and cached OCR follow via foreign keys)
+ * and deletes the underlying PDF: from disk in host mode, from the image
+ * (with a handle swap so readers stop seeing it) in VFS mode.
+ */
+void delete_file(PulsarCtx* ctx);
+
 #ifdef __cplusplus
 }
 #endif

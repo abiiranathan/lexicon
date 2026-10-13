@@ -1,5 +1,7 @@
 <script lang="ts">
   import PDFLogo from "./PDFLogo.svelte";
+  import { deleteFile } from "./lib/httpclient";
+  import type { AuthState } from "./lib/auth.svelte";
 
   type FilesListProps = {
     files: BookListResult;
@@ -12,6 +14,8 @@
       numPages: number,
       fileName: string,
     ) => void;
+    auth: AuthState;
+    onDeleted: (fileId: number) => void;
   };
 
   type FolderNode = {
@@ -21,7 +25,12 @@
     bookCount: number;
   };
 
-  let { files, filter, isLoading, error, viewPage }: FilesListProps = $props();
+  let { files, filter, isLoading, error, viewPage, auth, onDeleted }: FilesListProps =
+    $props();
+
+  let confirmDeleteId = $state<number | null>(null);
+  let deleteError = $state<string | null>(null);
+  let deletingId = $state<number | null>(null);
 
   let tree = $derived.by(() => {
     const root: FolderNode = {
@@ -61,9 +70,31 @@
   function handleFileClick(file: FileType) {
     viewPage(file.id, 1, file.num_pages, file.name);
   }
+
+  async function handleDeleteClick(file: FileType) {
+    if (deletingId !== null) return;
+    if (confirmDeleteId !== file.id) {
+      confirmDeleteId = file.id;
+      deleteError = null;
+      return;
+    }
+    confirmDeleteId = null;
+    deletingId = file.id;
+    try {
+      await deleteFile(file.id);
+      onDeleted(file.id);
+    } catch (err) {
+      deleteError = (err as Error).message;
+    } finally {
+      deletingId = null;
+    }
+  }
 </script>
 
 <div class="files-container">
+  {#if deleteError}
+    <p class="file-delete-error" role="alert">{deleteError}</p>
+  {/if}
   {#snippet renderFile(file: FileType)}
     <li class="tree-file">
       <button
@@ -94,6 +125,39 @@
           <path d="M5 12h14M12 5l7 7-7 7" />
         </svg>
       </button>
+      {#if auth.user?.is_admin}
+        <button
+          class="file-delete"
+          class:file-delete--confirm={confirmDeleteId === file.id}
+          onclick={() => handleDeleteClick(file)}
+          disabled={deletingId !== null}
+          type="button"
+          title={confirmDeleteId === file.id
+            ? `Click again to delete “${file.name}”`
+            : `Delete “${file.name}”`}
+          aria-label={confirmDeleteId === file.id
+            ? `Confirm deletion of ${file.name}`
+            : `Delete ${file.name}`}
+        >
+          {#if deletingId === file.id}
+            …
+          {:else if confirmDeleteId === file.id}
+            Sure?
+          {:else}
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              aria-hidden="true"
+            >
+              <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V6" />
+            </svg>
+          {/if}
+        </button>
+      {/if}
     </li>
   {/snippet}
 
@@ -305,13 +369,17 @@
 
   .tree-file {
     padding: 0.2rem 0;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
   }
 
   .tree-file-button {
     display: flex;
     align-items: center;
     gap: 0.875rem;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     padding: 0.75rem;
     border: 1px solid transparent;
     border-radius: 0.75rem;
@@ -384,6 +452,61 @@
     color: var(--primary);
     opacity: 1;
     transform: translateX(0);
+  }
+
+  .file-delete {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2rem;
+    height: 2rem;
+    padding: 0 0.5rem;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.15s ease,
+      color 0.12s,
+      background 0.12s,
+      border-color 0.12s;
+  }
+
+  .tree-file:hover .file-delete,
+  .file-delete:focus-visible {
+    opacity: 1;
+  }
+
+  .file-delete:hover:not(:disabled) {
+    color: var(--error);
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.25);
+  }
+
+  .file-delete:disabled {
+    opacity: 0.4;
+    cursor: wait;
+  }
+
+  .file-delete--confirm {
+    opacity: 1;
+    color: var(--error);
+    border-color: rgba(239, 68, 68, 0.4);
+  }
+
+  .file-delete-error {
+    margin: 0 0 0.75rem;
+    padding: 0.625rem 0.875rem;
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    border-radius: 0.625rem;
+    background: rgba(239, 68, 68, 0.08);
+    color: var(--error);
+    font-size: 0.8125rem;
   }
 
   .empty-state {

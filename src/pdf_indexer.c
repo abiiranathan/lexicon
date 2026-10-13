@@ -459,8 +459,10 @@ bool process_pdfs(const char* root_dir, const char* filename, int min_pages, boo
             const char* slash = strrchr(filename, '/');
             const char* base = (slash != NULL) ? slash + 1 : filename;
 
-            // Process the single file relative to the root directory.
-            if (!(process_host_file(NULL, filename, base, &indexerState))) {
+            // Process the single file relative to the root directory. Note:
+            // process_host_file returns a WalkDirOption (DirContinue == 0 on
+            // success), so only DirStop means the file was not processed.
+            if (process_host_file(NULL, filename, base, &indexerState) == DirStop) {
                 LOG_FATAL("Failed to process file: %s", filename);
             }
         } else if (!is_dir(root_dir)) {
