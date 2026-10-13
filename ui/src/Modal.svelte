@@ -38,6 +38,127 @@
   let textSelectionMode = $state(false);
   let textLayer = $state<TextLayerResult | null>(null);
   let textLayerElement = $state<HTMLDivElement | null>(null);
+  let textLayerColumns = $derived.by(() => {
+    if (!textLayer) return [];
+    const pageWidth = textLayer.width;
+
+    const words = [...textLayer.words].sort((a, b) => {
+      const centerDifference = (b.t + b.b - a.t - a.b) * 0.5;
+      return centerDifference || a.l - b.l;
+    });
+
+    const lines: {
+      top: number;
+      bottom: number;
+      words: TextLayerResult["words"];
+    }[] = [];
+
+    for (const word of words) {
+      const line = lines[lines.length - 1];
+      if (line) {
+        const center = (line.top + line.bottom) * 0.5;
+        const wordCenter = (word.t + word.b) * 0.5;
+        const tolerance =
+          Math.min(line.top - line.bottom, word.t - word.b) * 0.5;
+        if (Math.abs(center - wordCenter) <= tolerance) {
+          line.top = Math.max(line.top, word.t);
+          line.bottom = Math.min(line.bottom, word.b);
+          line.words.push(word);
+          continue;
+        }
+      }
+      lines.push({ top: word.t, bottom: word.b, words: [word] });
+    }
+
+    for (const line of lines) {
+      line.words.sort((a, b) => a.l - b.l);
+    }
+
+    const gapCandidates: { center: number; lineIndex: number }[] = [];
+    lines.forEach((line, lineIndex) => {
+      for (let index = 1; index < line.words.length; index++) {
+        const previous = line.words[index - 1];
+        const current = line.words[index];
+        const gap = current.l - previous.r;
+        const lineHeight = Math.min(
+          previous.t - previous.b,
+          current.t - current.b,
+        );
+        if (
+          gap >= Math.max(pageWidth * 0.02, lineHeight * 2)
+        ) {
+          gapCandidates.push({
+            center: (previous.r + current.l) * 0.5,
+            lineIndex,
+          });
+        }
+      }
+    });
+
+    gapCandidates.sort((a, b) => a.center - b.center);
+    const candidateGroups: {
+      center: number;
+      centers: number[];
+      lineIndexes: Set<number>;
+    }[] = [];
+    for (const candidate of gapCandidates) {
+      const group = candidateGroups[candidateGroups.length - 1];
+      if (
+        group &&
+        candidate.center - group.center <= pageWidth * 0.05
+      ) {
+        group.centers.push(candidate.center);
+        group.lineIndexes.add(candidate.lineIndex);
+        group.center =
+          group.centers.reduce((sum, center) => sum + center, 0) /
+          group.centers.length;
+      } else {
+        candidateGroups.push({
+          center: candidate.center,
+          centers: [candidate.center],
+          lineIndexes: new Set([candidate.lineIndex]),
+        });
+      }
+    }
+
+    const minimumColumnLines = Math.max(3, Math.ceil(lines.length * 0.15));
+    const columnCuts = candidateGroups
+      .filter((group) => group.lineIndexes.size >= minimumColumnLines)
+      .map((group) => group.center)
+      .sort((a, b) => a - b)
+      .filter(
+        (cut, index, cuts) =>
+          index === 0 || cut - cuts[index - 1] > pageWidth * 0.08,
+      );
+
+    const columns = Array.from({ length: columnCuts.length + 1 }, (_, index) => {
+      const left = index === 0 ? 0 : columnCuts[index - 1];
+      const right =
+        index === columnCuts.length ? pageWidth : columnCuts[index];
+      return { left, right, lines: [] as typeof lines };
+    });
+
+    for (const line of lines) {
+      const wordsByColumn = columns.map(() => [] as typeof line.words);
+      for (const word of line.words) {
+        const wordCenter = (word.l + word.r) * 0.5;
+        const columnIndex = columnCuts.findIndex((cut) => wordCenter < cut);
+        wordsByColumn[columnIndex < 0 ? columns.length - 1 : columnIndex].push(
+          word,
+        );
+      }
+      wordsByColumn.forEach((columnWords, index) => {
+        if (columnWords.length === 0) return;
+        columns[index].lines.push({
+          top: Math.max(...columnWords.map((word) => word.t)),
+          bottom: Math.min(...columnWords.map((word) => word.b)),
+          words: columnWords,
+        });
+      });
+    }
+
+    return columns.filter((column) => column.lines.length > 0);
+  });
   let textLayerLoading = $state(false);
   let textLayerError = $state<string | null>(null);
   let textLayerReload = $state(0);
@@ -185,7 +306,7 @@
               anchorNode.compareDocumentPosition(focusNode) &
                 Node.DOCUMENT_POSITION_FOLLOWING,
             );
-      layer.insertBefore(end, forward ? span.nextSibling : span);
+      span.parentElement?.insertBefore(end, forward ? span.nextSibling : span);
     };
 
     layer.addEventListener("mousedown", onMouseDown);
@@ -315,7 +436,10 @@
 
   let textMeasureContext: CanvasRenderingContext2D | null = null;
 
-  function selectableWordStyle(word: TextLayerResult["words"][number]): string {
+  function selectableWordStyle(
+    word: TextLayerResult["words"][number],
+    line: (typeof textLayerColumns)[number]["lines"][number],
+  ): string {
     if (!textLayer) return "";
     const layout = textLayerLayout();
     if (!layout) return "";
@@ -331,7 +455,51 @@
       textMeasureContext?.measureText(`${word.text} `).width ?? 0;
     const horizontalScale = naturalWidth > 0 ? boxWidth / naturalWidth : 1;
 
-    return `left:${(word.l / textLayer.width) * 100}%;top:${((textLayer.height - word.t) / textLayer.height) * 100}%;font-size:${fontSize}px;transform:scaleX(${horizontalScale})`;
+    const verticalOffset = ((line.top - word.t) / textLayer.height) * layout.height;
+    return `top:${verticalOffset}px;width:${boxWidth}px;height:${boxHeight}px;font-size:${fontSize}px;--word-scale:${horizontalScale}`;
+  }
+
+  function selectableLineStyle(
+    column: (typeof textLayerColumns)[number],
+    line: (typeof textLayerColumns)[number]["lines"][number],
+    index: number,
+  ): string {
+    if (!textLayer) return "";
+    const layout = textLayerLayout();
+    if (!layout) return "";
+    const top = ((textLayer.height - line.top) / textLayer.height) * layout.height;
+    const previous = column.lines[index - 1];
+    const previousBottom = previous
+      ? ((textLayer.height - previous.bottom) / textLayer.height) * layout.height
+      : 0;
+    const marginTop = Math.max(0, top - previousBottom);
+    const height = ((line.top - line.bottom) / textLayer.height) * layout.height;
+    const left = ((line.words[0].l - column.left) / textLayer.width) * layout.width;
+    const lineWidth =
+      ((line.words[line.words.length - 1].r - line.words[0].l) /
+        textLayer.width) *
+      layout.width;
+    return `margin-top:${marginTop}px;margin-left:${left}px;height:${height}px;width:${lineWidth}px;`;
+  }
+
+  function selectableWordGap(
+    line: (typeof textLayerColumns)[number]["lines"][number],
+    index: number,
+  ): string {
+    if (!textLayer || index === 0) return "0px";
+    const layout = textLayerLayout();
+    if (!layout) return "0px";
+    const gap = line.words[index].l - line.words[index - 1].r;
+    return `${Math.max(0, (gap / textLayer.width) * layout.width)}px`;
+  }
+
+  function selectableColumnStyle(column: (typeof textLayerColumns)[number]): string {
+    if (!textLayer) return "";
+    const layout = textLayerLayout();
+    if (!layout) return "";
+    const left = (column.left / textLayer.width) * layout.width;
+    const width = ((column.right - column.left) / textLayer.width) * layout.width;
+    return `left:${left}px;width:${width}px;`;
   }
 
   function handleSelectableTextCopy(event: ClipboardEvent): void {
@@ -344,6 +512,7 @@
 
     type CopyWord = {
       text: string;
+      column: number;
       left: number;
       right: number;
       bottom: number;
@@ -370,6 +539,7 @@
       })
       .map((element) => ({
         text: (element.dataset.text ?? "").trim(),
+        column: Number(element.dataset.column),
         left: Number(element.dataset.left),
         right: Number(element.dataset.right),
         bottom: Number(element.dataset.bottom),
@@ -378,6 +548,7 @@
       .filter(
         (word) =>
           word.text.length > 0 &&
+          Number.isFinite(word.column) &&
           Number.isFinite(word.left) &&
           Number.isFinite(word.right) &&
           Number.isFinite(word.bottom) &&
@@ -386,29 +557,31 @@
 
     if (words.length === 0) return;
 
-    // PDF coordinates are y-up, so a larger `top` is higher on the page.
-    // Sort top-to-bottom first, then group into lines using half the glyph height.
-    words.sort((a, b) => b.top - a.top);
+    // Keep each column in reading order before moving to the next column.
+    words.sort((a, b) => a.column - b.column || b.top - a.top);
 
-    const lines: CopyWord[][] = [];
+    const lines: { column: number; words: CopyWord[] }[] = [];
     for (const word of words) {
       const line = lines[lines.length - 1];
       if (line) {
-        const ref = line[0];
+        const ref = line.words[0];
         const tolerance =
           Math.min(ref.top - ref.bottom, word.top - word.bottom) * 0.5;
-        if (Math.abs(ref.top - word.top) <= tolerance) {
-          line.push(word);
+        if (
+          line.column === word.column &&
+          Math.abs(ref.top - word.top) <= tolerance
+        ) {
+          line.words.push(word);
           continue;
         }
       }
-      lines.push([word]);
+      lines.push({ column: word.column, words: [word] });
     }
 
     const closingPunct = /^[,.;:!?%)\]}»”’]+$/;
     const openingPunct = /^[(\[{«“‘]+$/;
 
-    const lineTexts = lines.map((line) => {
+    const lineTexts = lines.map(({ words: line }) => {
       // Reading order within a line is left-to-right.
       line.sort((a, b) => a.left - b.left);
 
@@ -1629,16 +1802,34 @@
                 aria-label="Selectable page text"
                 oncopy={handleSelectableTextCopy}
               >
-                {#each textLayer.words as word, index (index)}
-                  <span
-                    class="selectable-word"
-                    data-text={word.text}
-                    data-left={word.l}
-                    data-right={word.r}
-                    data-bottom={word.b}
-                    data-top={word.t}
-                    style={selectableWordStyle(word)}>{word.text}{" "}</span
+                {#each textLayerColumns as column, columnIndex (columnIndex)}
+                  <div
+                    class="selectable-column"
+                    style={selectableColumnStyle(column)}
                   >
+                    {#each column.lines as line, lineIndex (lineIndex)}
+                      <div
+                        class="selectable-line"
+                        style={selectableLineStyle(column, line, lineIndex)}
+                      >
+                        {#each line.words as word, wordIndex (wordIndex)}
+                          <span
+                            class="selectable-word"
+                            data-text={word.text}
+                            data-column={columnIndex}
+                            data-left={word.l}
+                            data-right={word.r}
+                            data-bottom={word.b}
+                            data-top={word.t}
+                            style={`margin-left:${selectableWordGap(line, wordIndex)};${selectableWordStyle(word, line)}`}
+                            ><span class="selectable-word-text"
+                              >{word.text}{" "}</span
+                            ></span
+                          >
+                        {/each}
+                      </div>
+                    {/each}
+                  </div>
                 {/each}
               </div>
             {/if}
@@ -2288,22 +2479,49 @@
   }
 
   .selectable-word {
-    position: absolute;
-    display: block;
-    width: max-content;
+    position: relative;
+    display: inline-block;
+    vertical-align: top;
     overflow: visible;
     color: transparent;
-    font-family: Arial, sans-serif;
-    font-weight: 400;
-    line-height: 1;
     white-space: pre;
-    transform-origin: left top;
     cursor: text;
     user-select: text;
     -webkit-user-select: text;
   }
 
-  .selectable-word::selection {
+  .selectable-line {
+    position: relative;
+    display: block;
+    box-sizing: border-box;
+    max-width: 100%;
+    white-space: pre;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .selectable-column {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .selectable-word-text {
+    display: inline-block;
+    color: transparent;
+    font-family: Arial, sans-serif;
+    font-weight: 400;
+    line-height: 1;
+    white-space: pre;
+    transform: scaleX(var(--word-scale));
+    transform-origin: left top;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .selectable-word-text::selection {
     color: transparent;
     background: rgba(59, 130, 246, 0.72);
   }
