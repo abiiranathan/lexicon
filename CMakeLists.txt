@@ -18,6 +18,7 @@ pkg_check_modules(TESSERACT REQUIRED IMPORTED_TARGET tesseract)
 add_executable(${PROJECT_NAME} 
     src/main.c 
     src/routes.c 
+    src/ocr.c
     src/pdf_indexer.c
     src/database.c
     src/json_response.c
