@@ -1,1429 +1,24 @@
 <!-- Modal.svelte -->
 <script lang="ts">
-  import { searchAPI, fetchPageText, fetchTextLayer } from "./lib/httpclient";
-  import { useLocalStorage } from "./lib/localstorage.svelte";
-
-  type ModalProps = {
-    isOpen: boolean;
-    onClose: () => void;
-    modalContent: ModalContentType | null;
-    viewPage: (
-      fileId: number,
-      pageNum: number,
-      numPages: number,
-      fileName: string,
-    ) => void;
-  };
+  import { ModalController } from "./lib/modal/modal-controller.svelte";
+  import type { ModalProps } from "./lib/modal/modal-types";
 
   let { isOpen, onClose, modalContent, viewPage }: ModalProps = $props();
 
-  let pageInputValue = $state("");
-  let showPageInput = $state(false);
-
-  // Canvas and image state
-  let canvasElement = $state<HTMLCanvasElement | null>(null);
-  let containerElement = $state<HTMLDivElement | null>(null);
-  let canvasSize = $state({ width: 0, height: 0 });
-  let imageLoaded = $state(false);
-  let loadedImage = $state<HTMLImageElement | null>(null);
-  type AnnotationPoint = { x: number; y: number };
-  type AnnotationStroke = {
-    points: AnnotationPoint[];
-    width: number;
-  };
-  let annotations = $state<Record<string, AnnotationStroke[]>>({});
-  let annotationMode = $state(false);
-  let activeAnnotationStroke: AnnotationStroke | null = null;
-  let annotationStartY = 0;
-  let textSelectionMode = $state(false);
-  let textLayer = $state<TextLayerResult | null>(null);
-  let textLayerElement = $state<HTMLDivElement | null>(null);
-  let textLayerColumns = $derived.by(() => {
-    if (!textLayer) return [];
-    const pageWidth = textLayer.width;
-
-    const words = [...textLayer.words].sort((a, b) => {
-      const centerDifference = (b.t + b.b - a.t - a.b) * 0.5;
-      return centerDifference || a.l - b.l;
-    });
-
-    const lines: {
-      top: number;
-      bottom: number;
-      words: TextLayerResult["words"];
-    }[] = [];
-
-    for (const word of words) {
-      const line = lines[lines.length - 1];
-      if (line) {
-        const center = (line.top + line.bottom) * 0.5;
-        const wordCenter = (word.t + word.b) * 0.5;
-        const tolerance =
-          Math.min(line.top - line.bottom, word.t - word.b) * 0.5;
-        if (Math.abs(center - wordCenter) <= tolerance) {
-          line.top = Math.max(line.top, word.t);
-          line.bottom = Math.min(line.bottom, word.b);
-          line.words.push(word);
-          continue;
-        }
-      }
-      lines.push({ top: word.t, bottom: word.b, words: [word] });
-    }
-
-    for (const line of lines) {
-      line.words.sort((a, b) => a.l - b.l);
-    }
-
-    // Column cuts are detected on the original geometry below (cutLines):
-    // removing markers first would merge the neighbouring gaps into wide
-    // phantom gutters that forge false cuts, split a column mid-row and
-    // scramble DOM order — lower rows then highlight while selecting row 1.
-    const cutLines = lines.map((l) => ({
-      top: l.top,
-      bottom: l.bottom,
-      words: [...l.words],
-    }));
-
-    // Ignore super/subscript words (e.g. citation numerals like 12, 13–18
-    // or 5,19,23–41): left in place they split into stray lines that break
-    // the margin-stacked layout and push following lines out of position, so
-    // the next line's selection highlight is no longer shown (the text itself
-    // is still selected), and they pollute copied text. A word is
-    // super/subscript when it sits off the row baseline (raised or lowered),
-    // at any size: markers are often full-size but raised, and clusters like
-    // 5,19,23–41 defeat a pure size test because comma tails dip back down
-    // to the baseline. Citation-shaped tokens (digits with , ; : . - – —
-    // brackets) therefore get a strict box test, while baseline-aligned
-    // numbers (19 patients, 1,000, table rows, B12) are kept.
-    const BASE_RATIO = 0.25;
-    const NARROW_RATIO = 0.25;
-    const CITE_RE = /^[\d,;:.·\-–—\[\]()]*\d[\d,;:.·\-–—\[\]()]*$/;
-    const lowerMedian = (values: number[]): number => {
-      const sorted = [...values].sort((a, b) => a - b);
-      return sorted[(sorted.length - 1) >> 1];
-    };
-    type LayerWord = TextLayerResult["words"][number];
-    // Geometry reference for a row: plain (non-citation) words, so marker
-    // boxes cannot poison the baseline — unless plain is only small
-    // punctuation (e.g. a lone dash), in which case fall back to all words.
-    const statsOf = (ws: LayerWord[]): {
-      maxH: number;
-      baseline: number;
-      rowTop: number;
-    } => {
-      const plain = ws.filter((w) => !CITE_RE.test(w.text));
-      const lineMaxH = Math.max(...ws.map((w) => w.t - w.b));
-      const ref =
-        plain.length > 0 &&
-        Math.max(...plain.map((w) => w.t - w.b)) >= lineMaxH * 0.5
-          ? plain
-          : ws;
-      const maxH = Math.max(...ref.map((w) => w.t - w.b));
-      const tall = ref.filter(
-        (w) => !(maxH > 0 && w.t - w.b < maxH * 0.7),
-      );
-      const use = tall.length > 0 ? tall : ref;
-      return {
-        maxH,
-        baseline: lowerMedian(use.map((w) => w.b)),
-        rowTop: lowerMedian(use.map((w) => w.t)),
-      };
-    };
-    const bands = lines.map((l) => ({ top: l.top, bottom: l.bottom }));
-
-    lines.forEach((line, index) => {
-      const st = statsOf(line.words);
-      const limit = st.maxH * BASE_RATIO;
-      const hasPlain = line.words.some((w) => !CITE_RE.test(w.text));
-      line.words = line.words.filter((w) => {
-        if (!CITE_RE.test(w.text) || !hasPlain) {
-          // Body text: bottom rests on the baseline; below it only with a
-          // normal top (descenders); centred punctuation straddling the
-          // baseline is kept too.
-          return (
-            (w.b <= st.baseline + limit && w.b >= st.baseline - limit) ||
-            w.t >= st.rowTop - limit ||
-            (w.b < st.baseline + limit && w.t > st.baseline - limit)
-          );
-        }
-        // Citation candidate: keep only when the box sits exactly on the
-        // row geometry (top may be short for small digits, but the bottom
-        // must rest on the baseline — comma tails dipping down fail this).
-        const h = w.t - w.b;
-        const bOk = w.b <= st.baseline + limit && w.b >= st.baseline - limit;
-        const tOk = w.t <= st.rowTop + limit && w.t >= st.rowTop - limit;
-        return bOk && (tOk || !(st.maxH > 0 && h >= st.maxH * 0.7));
-      });
-
-      // Narrow debris lines (stray markers that grouped alone): drop them
-      // when they strictly overlap a neighbouring row yet sit off its
-      // baseline (this overlap is what breaks the layout), or when they are
-      // small floaters just above a row (raised sup). Full-width rows,
-      // touching-but-aligned rows (punctuation), distant small rows
-      // (footnotes) and tight neighbouring rows are kept.
-      const neighbourIndexes: number[] = [];
-      if (index > 0) neighbourIndexes.push(index - 1);
-      if (index < lines.length - 1) neighbourIndexes.push(index + 1);
-      const ownH =
-        line.words.length > 0
-          ? Math.max(...line.words.map((w) => w.t - w.b))
-          : 0;
-      const lineWidth =
-        line.words.length > 0
-          ? Math.max(...line.words.map((w) => w.r)) - line.words[0].l
-          : 0;
-      if (line.words.length > 0 && lineWidth < pageWidth * NARROW_RATIO) {
-        let refH = 0;
-        for (const j of neighbourIndexes)
-          refH = Math.max(refH, statsOf(lines[j].words).maxH);
-        const smallLine = refH > 0 && ownH < refH * 0.7;
-        for (const j of neighbourIndexes) {
-          if (lines[j].words.length === 0) continue;
-          const band = bands[j];
-          const nst = statsOf(lines[j].words);
-          const nLimit = nst.maxH * BASE_RATIO;
-          const raised = line.bottom > nst.baseline + nLimit;
-          const lowered = line.bottom < nst.baseline - nLimit;
-          const overlaps = line.top > band.bottom && line.bottom < band.top;
-          const dAbove = line.bottom - band.top;
-          const nearAbove = dAbove > 0 && dAbove <= ownH * 0.5;
-          if (
-            (overlaps && (raised || lowered)) ||
-            (smallLine && nearAbove && raised)
-          ) {
-            line.words = [];
-            break;
-          }
-        }
-      }
-      if (line.words.length > 0) {
-        line.top = Math.max(...line.words.map((w) => w.t));
-        line.bottom = Math.min(...line.words.map((w) => w.b));
-      }
-    });
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].words.length === 0) lines.splice(i, 1);
-    }
-
-    const gapCandidates: { center: number; lineIndex: number }[] = [];
-    cutLines.forEach((line, lineIndex) => {
-      for (let index = 1; index < line.words.length; index++) {
-        const previous = line.words[index - 1];
-        const current = line.words[index];
-        const gap = current.l - previous.r;
-        const lineHeight = Math.min(
-          previous.t - previous.b,
-          current.t - current.b,
-        );
-        if (gap >= Math.max(pageWidth * 0.02, lineHeight * 2)) {
-          gapCandidates.push({
-            center: (previous.r + current.l) * 0.5,
-            lineIndex,
-          });
-        }
-      }
-    });
-
-    gapCandidates.sort((a, b) => a.center - b.center);
-    const candidateGroups: {
-      center: number;
-      centers: number[];
-      lineIndexes: Set<number>;
-    }[] = [];
-    for (const candidate of gapCandidates) {
-      const group = candidateGroups[candidateGroups.length - 1];
-      if (group && candidate.center - group.center <= pageWidth * 0.05) {
-        group.centers.push(candidate.center);
-        group.lineIndexes.add(candidate.lineIndex);
-        group.center =
-          group.centers.reduce((sum, center) => sum + center, 0) /
-          group.centers.length;
-      } else {
-        candidateGroups.push({
-          center: candidate.center,
-          centers: [candidate.center],
-          lineIndexes: new Set([candidate.lineIndex]),
-        });
-      }
-    }
-
-    const minimumColumnLines = Math.max(3, Math.ceil(cutLines.length * 0.15));
-    const columnCuts = candidateGroups
-      .filter((group) => group.lineIndexes.size >= minimumColumnLines)
-      .map((group) => group.center)
-      .sort((a, b) => a - b)
-      .filter(
-        (cut, index, cuts) =>
-          index === 0 || cut - cuts[index - 1] > pageWidth * 0.08,
-      );
-
-    const columns = Array.from(
-      { length: columnCuts.length + 1 },
-      (_, index) => {
-        const left = index === 0 ? 0 : columnCuts[index - 1];
-        const right =
-          index === columnCuts.length ? pageWidth : columnCuts[index];
-        return { left, right, lines: [] as typeof lines };
-      },
-    );
-
-    for (const line of lines) {
-      const wordsByColumn = columns.map(() => [] as typeof line.words);
-      for (const word of line.words) {
-        const wordCenter = (word.l + word.r) * 0.5;
-        const columnIndex = columnCuts.findIndex((cut) => wordCenter < cut);
-        wordsByColumn[columnIndex < 0 ? columns.length - 1 : columnIndex].push(
-          word,
-        );
-      }
-      wordsByColumn.forEach((columnWords, index) => {
-        if (columnWords.length === 0) return;
-        columns[index].lines.push({
-          top: Math.max(...columnWords.map((word) => word.t)),
-          bottom: Math.min(...columnWords.map((word) => word.b)),
-          words: columnWords,
-        });
-      });
-    }
-
-    return columns.filter((column) => column.lines.length > 0);
+  const modal = new ModalController({
+    get content() {
+      return modalContent;
+    },
+    get isOpen() {
+      return isOpen;
+    },
+    get onClose() {
+      return onClose;
+    },
+    get viewPage() {
+      return viewPage;
+    },
   });
-  let textLayerLoading = $state(false);
-  let textLayerError = $state<string | null>(null);
-  let textLayerReload = $state(0);
-
-  // Text layer state
-  let renderTextSetting = useLocalStorage("render-text", true);
-  let pageText = $state<string>("");
-
-  // View mode: default to 'fit' on small screens (< 760px) and 'scroll' on larger screens
-  let viewMode = $state<"fit" | "scroll">(
-    typeof window !== "undefined" && window.innerWidth < 760 ? "fit" : "scroll",
-  );
-
-  // Search state — reset whenever the active file changes.
-  let searchQuery = $state("");
-  let searchResults = $state<{ results: SearchResult[] }>({ results: [] });
-  let isSearching = $state(false);
-  let searchError = $state<string | null>(null);
-  let searchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
-  let showMobileSearch = $state(false);
-
-  // Pan and zoom state (only used in 'fit' mode)
-  let scale = $state(1);
-  let translateX = $state(0);
-  let translateY = $state(0);
-  let isDragging = $state(false);
-  let lastTouchDistance = $state(0);
-  let dragStartX = $state(0);
-  let dragStartY = $state(0);
-  let rotation = $state(0); // 0, 90, 180, 270
-
-  // ---------------------------------------------------------------------------
-  // Reset search state when the viewed file changes so stale results
-  // from a previous document are never shown in the current one.
-  // ---------------------------------------------------------------------------
-  let lastFileId = $state<number | null>(null);
-
-  $effect(() => {
-    if (!modalContent) return;
-    if (modalContent.file_id !== lastFileId) {
-      lastFileId = modalContent.file_id;
-      searchQuery = "";
-      searchResults = { results: [] };
-      searchError = null;
-      isSearching = false;
-    }
-  });
-
-  // Sync URL state with modal
-  $effect(() => {
-    if (isOpen && modalContent) {
-      const params = new URLSearchParams(window.location.search);
-      params.set("file", modalContent.file_id.toString());
-      params.set("page", modalContent.page.toString());
-      window.history.replaceState(
-        {},
-        "",
-        `${window.location.pathname}?${params.toString()}`,
-      );
-    } else if (!isOpen) {
-      const params = new URLSearchParams(window.location.search);
-      params.delete("file");
-      params.delete("page");
-      const newUrl = params.toString()
-        ? `${window.location.pathname}?${params.toString()}`
-        : window.location.pathname;
-      window.history.replaceState({}, "", newUrl);
-    }
-  });
-
-  $effect(() => {
-    document.body.style.overflow = isOpen ? "hidden" : "auto";
-  });
-
-  $effect(() => {
-    const reload = textLayerReload;
-    void reload;
-    if (!isOpen || !imageLoaded || !textSelectionMode || !modalContent) {
-      textLayer = null;
-      textLayerLoading = false;
-      textLayerError = null;
-      return;
-    }
-
-    let active = true;
-    textLayer = null;
-    textLayerLoading = true;
-    textLayerError = null;
-
-    fetchTextLayer(modalContent.file_id, modalContent.page)
-      .then((result) => {
-        if (active) textLayer = result;
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          textLayerError =
-            error instanceof Error ? error.message : "Unable to load page text";
-        }
-      })
-      .finally(() => {
-        if (active) textLayerLoading = false;
-      });
-
-    return () => {
-      active = false;
-    };
-  });
-
-  $effect(() => {
-    const layer = textLayerElement;
-    if (!layer) return;
-
-    const end = document.createElement("div");
-    end.className = "end-of-content";
-    layer.append(end);
-
-    const park = (): void => {
-      layer.classList.remove("selecting");
-      layer.append(end);
-    };
-
-    const onMouseDown = (): void => {
-      layer.classList.add("selecting");
-    };
-
-    const onMouseUp = (): void => park();
-
-    const onSelectionChange = (): void => {
-      if (!layer.classList.contains("selecting")) return;
-      const selection = document.getSelection();
-      if (!selection || selection.rangeCount === 0) return;
-
-      const { anchorNode, focusNode } = selection;
-      if (!anchorNode || !focusNode) return;
-
-      const focusElement =
-        focusNode instanceof Element ? focusNode : focusNode.parentElement;
-      const span = focusElement?.closest<HTMLElement>(".selectable-word");
-      if (!span || !layer.contains(span)) return;
-
-      const forward =
-        anchorNode === focusNode
-          ? selection.anchorOffset <= selection.focusOffset
-          : Boolean(
-              anchorNode.compareDocumentPosition(focusNode) &
-                Node.DOCUMENT_POSITION_FOLLOWING,
-            );
-      span.parentElement?.insertBefore(end, forward ? span.nextSibling : span);
-    };
-
-    layer.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("mouseup", onMouseUp);
-    document.addEventListener("selectionchange", onSelectionChange);
-
-    return () => {
-      layer.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("mouseup", onMouseUp);
-      document.removeEventListener("selectionchange", onSelectionChange);
-      layer.classList.remove("selecting");
-      end.remove();
-    };
-  });
-
-  // Fetch text layer coordinates asynchronously
-  $effect(() => {
-    if (!isOpen || !modalContent) {
-      pageText = "";
-      return;
-    }
-
-    const fileId = modalContent.file_id;
-    const pageNum = modalContent.page;
-
-    if (!renderTextSetting.value) {
-      pageText = "";
-      return;
-    }
-
-    let active = true;
-
-    fetchPageText(fileId, pageNum)
-      .then((data) => {
-        if (active) {
-          pageText = data;
-        }
-      })
-      .catch((err) => {
-        if (active) {
-          pageText = "";
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  });
-
-  let copySuccess = $state(false);
-
-  function copyToClipboard(): void {
-    if (!pageText) return;
-
-    navigator.clipboard
-      .writeText(pageText)
-      .then(() => {
-        copySuccess = true;
-        setTimeout(() => {
-          copySuccess = false;
-        }, 2000);
-      })
-      .catch((err) => {
-        console.error("Failed to copy text:", err);
-      });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Canvas rendering — pure image scaling and rotation
-  // ---------------------------------------------------------------------------
-
-  const isLandscapeRotation = $derived(rotation === 90 || rotation === 270);
-
-  function textLayerLayout(): {
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-    transform: string;
-  } | null {
-    if (!canvasElement || !loadedImage || !containerElement) return null;
-    const canvasWidth = canvasSize.width || canvasElement.clientWidth;
-    const canvasHeight = canvasSize.height || canvasElement.clientHeight;
-    const imageWidth = isLandscapeRotation
-      ? loadedImage.height
-      : loadedImage.width;
-    const imageHeight = isLandscapeRotation
-      ? loadedImage.width
-      : loadedImage.height;
-    const aspect = imageWidth / imageHeight;
-    const containerAspect = canvasWidth / canvasHeight;
-    const drawWidth =
-      viewMode === "scroll"
-        ? canvasWidth
-        : aspect > containerAspect
-          ? canvasWidth
-          : canvasHeight * aspect;
-    const drawHeight =
-      viewMode === "scroll"
-        ? canvasHeight
-        : aspect > containerAspect
-          ? canvasWidth / aspect
-          : canvasHeight;
-
-    const pageWidth = isLandscapeRotation ? drawHeight : drawWidth;
-    const pageHeight = isLandscapeRotation ? drawWidth : drawHeight;
-    const left = canvasElement.offsetLeft + (canvasWidth - pageWidth) / 2;
-    const top = canvasElement.offsetTop + (canvasHeight - pageHeight) / 2;
-    const pageScale = viewMode === "fit" ? scale : 1;
-    const panX = viewMode === "fit" ? translateX * scale : 0;
-    const panY = viewMode === "fit" ? translateY * scale : 0;
-
-    return {
-      left,
-      top,
-      width: pageWidth,
-      height: pageHeight,
-      transform: `translate(${panX}px,${panY}px) scale(${pageScale}) rotate(${rotation}deg)`,
-    };
-  }
-
-  function textLayerStyle(): string {
-    const layout = textLayerLayout();
-    if (!layout) return "";
-    return `left:${layout.left}px;top:${layout.top}px;width:${layout.width}px;height:${layout.height}px;transform:${layout.transform}`;
-  }
-
-  let textMeasureContext: CanvasRenderingContext2D | null = null;
-
-  function selectableWordStyle(
-    word: TextLayerResult["words"][number],
-    line: (typeof textLayerColumns)[number]["lines"][number],
-  ): string {
-    if (!textLayer) return "";
-    const layout = textLayerLayout();
-    if (!layout) return "";
-
-    const boxHeight = ((word.t - word.b) / textLayer.height) * layout.height;
-    const boxWidth = ((word.r - word.l) / textLayer.width) * layout.width;
-    const fontSize = Math.max(1, boxHeight);
-    textMeasureContext ??= document.createElement("canvas").getContext("2d");
-    let letterSpacing = 0;
-    if (textMeasureContext) {
-      textMeasureContext.font = `${fontSize}px Arial`;
-      // Stretch (or compress) the text so its advance matches the PDF word
-      // box exactly. Divide by the character count (not count - 1) because
-      // browsers add letter-spacing after every glyph including the last one;
-      // dividing by count - 1 overflows the box and the overlapping
-      // translucent highlights paint darker seams between words.
-      const naturalWidth = textMeasureContext.measureText(word.text).width;
-      const characterCount = [...word.text].length;
-      if (characterCount > 0 && naturalWidth > 0) {
-        letterSpacing = (boxWidth - naturalWidth) / characterCount;
-      }
-    }
-
-    const verticalOffset =
-      ((line.top - word.t) / textLayer.height) * layout.height;
-    return `top:${verticalOffset}px;width:${boxWidth}px;height:${boxHeight}px;font-size:${fontSize}px;line-height:${boxHeight}px;letter-spacing:${letterSpacing}px;`;
-  }
-
-  function selectableLineStyle(
-    column: (typeof textLayerColumns)[number],
-    line: (typeof textLayerColumns)[number]["lines"][number],
-    index: number,
-  ): string {
-    if (!textLayer) return "";
-    const layout = textLayerLayout();
-    if (!layout) return "";
-    const top =
-      ((textLayer.height - line.top) / textLayer.height) * layout.height;
-    const previous = column.lines[index - 1];
-    const previousBottom = previous
-      ? ((textLayer.height - previous.bottom) / textLayer.height) *
-        layout.height
-      : 0;
-    const marginTop = Math.max(0, top - previousBottom);
-    const height =
-      ((line.top - line.bottom) / textLayer.height) * layout.height;
-    const left =
-      ((line.words[0].l - column.left) / textLayer.width) * layout.width;
-    const lineWidth =
-      ((line.words[line.words.length - 1].r - line.words[0].l) /
-        textLayer.width) *
-      layout.width;
-    return `margin-top:${marginTop}px;margin-left:${left}px;height:${height}px;width:${lineWidth}px;`;
-  }
-
-  function selectableWordGapWidth(
-    line: (typeof textLayerColumns)[number]["lines"][number],
-    index: number,
-  ): number {
-    if (!textLayer || index === 0) return 0;
-    const layout = textLayerLayout();
-    if (!layout) return 0;
-    const gap = line.words[index].l - line.words[index - 1].r;
-    return Math.max(0, (gap / textLayer.width) * layout.width);
-  }
-
-  // Inter-word gaps are real selectable spacers, not margins: native
-  // ::selection never paints margins, so margin gaps stay unpainted (white)
-  // while words get the custom color. A single space stretched with
-  // letter-spacing to exactly the PDF gap width paints continuously with the
-  // same color as the words.
-  function selectableGapStyle(
-    line: (typeof textLayerColumns)[number]["lines"][number],
-    index: number,
-  ): string {
-    if (!textLayer) return "";
-    const layout = textLayerLayout();
-    if (!layout) return "";
-    const gapWidth = selectableWordGapWidth(line, index);
-    if (gapWidth <= 0) return "display:none;";
-    const height =
-      ((line.top - line.bottom) / textLayer.height) * layout.height;
-    const fontSize = Math.max(1, height);
-    textMeasureContext ??= document.createElement("canvas").getContext("2d");
-    let letterSpacing = 0;
-    if (textMeasureContext) {
-      textMeasureContext.font = `${fontSize}px Arial`;
-      letterSpacing = gapWidth - textMeasureContext.measureText(" ").width;
-    }
-    return `width:${gapWidth}px;height:${height}px;font-size:${fontSize}px;line-height:${height}px;letter-spacing:${letterSpacing}px;`;
-  }
-
-  function selectableColumnStyle(
-    column: (typeof textLayerColumns)[number],
-  ): string {
-    if (!textLayer) return "";
-    const layout = textLayerLayout();
-    if (!layout) return "";
-    const left = (column.left / textLayer.width) * layout.width;
-    const width =
-      ((column.right - column.left) / textLayer.width) * layout.width;
-    return `left:${left}px;width:${width}px;`;
-  }
-
-  function handleSelectableTextCopy(event: ClipboardEvent): void {
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0)
-      return;
-
-    const range = selection.getRangeAt(0);
-    const selectionRects = Array.from(range.getClientRects());
-
-    type CopyWord = {
-      text: string;
-      column: number;
-      left: number;
-      right: number;
-      bottom: number;
-      top: number;
-    };
-
-    // Collect the words whose spans intersect the selection (and its rects).
-    const words: CopyWord[] = Array.from(
-      (event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(
-        ".selectable-word",
-      ),
-    )
-      .filter((element) => {
-        if (!range.intersectsNode(element)) return false;
-        if (selectionRects.length === 0) return true;
-        const rect = element.getBoundingClientRect();
-        return selectionRects.some(
-          (selected) =>
-            rect.left < selected.right &&
-            rect.right > selected.left &&
-            rect.top < selected.bottom &&
-            rect.bottom > selected.top,
-        );
-      })
-      .map((element) => ({
-        text: (element.dataset.text ?? "").trim(),
-        column: Number(element.dataset.column),
-        left: Number(element.dataset.left),
-        right: Number(element.dataset.right),
-        bottom: Number(element.dataset.bottom),
-        top: Number(element.dataset.top),
-      }))
-      .filter(
-        (word) =>
-          word.text.length > 0 &&
-          Number.isFinite(word.column) &&
-          Number.isFinite(word.left) &&
-          Number.isFinite(word.right) &&
-          Number.isFinite(word.bottom) &&
-          Number.isFinite(word.top),
-      );
-
-    if (words.length === 0) return;
-
-    // Keep each column in reading order before moving to the next column.
-    words.sort((a, b) => a.column - b.column || b.top - a.top);
-
-    const lines: { column: number; words: CopyWord[] }[] = [];
-    for (const word of words) {
-      const line = lines[lines.length - 1];
-      if (line) {
-        const ref = line.words[0];
-        const tolerance =
-          Math.min(ref.top - ref.bottom, word.top - word.bottom) * 0.5;
-        if (
-          line.column === word.column &&
-          Math.abs(ref.top - word.top) <= tolerance
-        ) {
-          line.words.push(word);
-          continue;
-        }
-      }
-      lines.push({ column: word.column, words: [word] });
-    }
-
-    const closingPunct = /^[,.;:!?%)\]}»”’]+$/;
-    const openingPunct = /^[(\[{«“‘]+$/;
-
-    const lineTexts = lines.map(({ words: line }) => {
-      // Reading order within a line is left-to-right.
-      line.sort((a, b) => a.left - b.left);
-
-      let out = "";
-      let prev: CopyWord | undefined;
-      for (const word of line) {
-        if (prev) {
-          const height = Math.max(1, word.top - word.bottom);
-          const gap = word.left - prev.right;
-          // No space before closing punctuation or after opening punctuation
-          // when the glyphs are visually adjacent; otherwise separate words.
-          const attach =
-            (closingPunct.test(word.text) && gap < height * 0.3) ||
-            (openingPunct.test(prev.text) && gap < height * 0.3);
-          if (!attach) out += " ";
-        }
-        out += word.text;
-        prev = word;
-      }
-      return out;
-    });
-
-    const copiedText = lineTexts.join("\n");
-    if (copiedText && event.clipboardData) {
-      event.preventDefault();
-      event.clipboardData.setData("text/plain", copiedText);
-    }
-  }
-
-  function toggleTextSelection(): void {
-    textSelectionMode = !textSelectionMode;
-    if (textSelectionMode) {
-      annotationMode = false;
-      activeAnnotationStroke = null;
-    }
-  }
-
-  function prepareContext(
-    canvas: HTMLCanvasElement,
-    container: HTMLDivElement,
-    cssWidth: number,
-    cssHeight: number,
-  ): CanvasRenderingContext2D | null {
-    const dpr = window.devicePixelRatio || 1;
-
-    canvas.width = Math.round(cssWidth * dpr);
-    canvas.height = Math.round(cssHeight * dpr);
-    canvas.style.width = `${cssWidth}px`;
-    canvas.style.height = `${cssHeight}px`;
-    canvasSize = { width: cssWidth, height: cssHeight };
-
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return null;
-
-    ctx.scale(dpr, dpr);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = "high";
-
-    return ctx;
-  }
-
-  function drawRotatedImage(
-    ctx: CanvasRenderingContext2D,
-    img: HTMLImageElement,
-    cx: number,
-    cy: number,
-    drawWidth: number,
-    drawHeight: number,
-    deg: number,
-  ): void {
-    const rad = (deg * Math.PI) / 180;
-    const swapped = deg === 90 || deg === 270;
-
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(rad);
-
-    const dw = swapped ? drawHeight : drawWidth;
-    const dh = swapped ? drawWidth : drawHeight;
-    ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
-
-    const key = getAnnotationKey();
-    const strokes = key ? (annotations[key] ?? []) : [];
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = "#e11d48";
-    for (const stroke of strokes) {
-      if (stroke.points.length === 0) continue;
-      ctx.beginPath();
-      ctx.lineWidth = stroke.width;
-      if (stroke.points.length === 1) {
-        const point = stroke.points[0];
-        ctx.arc(
-          (point.x / img.width) * dw - dw / 2,
-          (point.y / img.height) * dh - dh / 2,
-          stroke.width / 2,
-          0,
-          2 * Math.PI,
-        );
-        ctx.fillStyle = ctx.strokeStyle;
-        ctx.fill();
-        continue;
-      }
-      ctx.moveTo(
-        (stroke.points[0].x / img.width) * dw - dw / 2,
-        (stroke.points[0].y / img.height) * dh - dh / 2,
-      );
-      for (const point of stroke.points.slice(1)) {
-        ctx.lineTo(
-          (point.x / img.width) * dw - dw / 2,
-          (point.y / img.height) * dh - dh / 2,
-        );
-      }
-      ctx.stroke();
-    }
-
-    ctx.restore();
-  }
-
-  function getAnnotationKey(): string | null {
-    return modalContent ? `${modalContent.file_id}:${modalContent.page}` : null;
-  }
-
-  function getCanvasPoint(
-    clientX: number,
-    clientY: number,
-    lockY?: number,
-  ): {
-    canvasX: number;
-    canvasY: number;
-    imageX: number;
-    imageY: number;
-    imageUnitsPerPixel: number;
-  } | null {
-    if (!canvasElement || !containerElement || !loadedImage) return null;
-
-    const rect = canvasElement.getBoundingClientRect();
-    const canvasX = clientX - rect.left;
-    const canvasY = (lockY ?? clientY) - rect.top;
-    const img = loadedImage;
-    const imgW = isLandscapeRotation ? img.height : img.width;
-    const imgH = isLandscapeRotation ? img.width : img.height;
-    const imgAspect = imgW / imgH;
-    const cssWidth = rect.width;
-    const cssHeight = rect.height;
-    const containerAspect = cssWidth / cssHeight;
-    const drawWidth =
-      viewMode === "scroll"
-        ? cssWidth
-        : imgAspect > containerAspect
-          ? cssWidth
-          : cssHeight * imgAspect;
-    const drawHeight =
-      viewMode === "scroll"
-        ? cssHeight
-        : imgAspect > containerAspect
-          ? cssWidth / imgAspect
-          : cssHeight;
-    const dw = isLandscapeRotation ? drawHeight : drawWidth;
-    const dh = isLandscapeRotation ? drawWidth : drawHeight;
-    const cx = cssWidth / 2;
-    const cy = cssHeight / 2;
-    const pointX =
-      viewMode === "fit" ? (canvasX - cx) / scale - translateX : canvasX - cx;
-    const pointY =
-      viewMode === "fit" ? (canvasY - cy) / scale - translateY : canvasY - cy;
-    const rad = (-rotation * Math.PI) / 180;
-    const rotatedX = pointX * Math.cos(rad) - pointY * Math.sin(rad);
-    const rotatedY = pointX * Math.sin(rad) + pointY * Math.cos(rad);
-
-    return {
-      canvasX,
-      canvasY,
-      imageX: (rotatedX / dw + 0.5) * img.width,
-      imageY: (rotatedY / dh + 0.5) * img.height,
-      imageUnitsPerPixel: img.width / dw,
-    };
-  }
-
-  function renderCanvas(): void {
-    if (!canvasElement || !containerElement || !loadedImage) return;
-
-    const canvas = canvasElement;
-    const container = containerElement;
-    const img = loadedImage;
-
-    const imgW = isLandscapeRotation ? img.height : img.width;
-    const imgH = isLandscapeRotation ? img.width : img.height;
-    const imgAspect = imgW / imgH;
-
-    if (viewMode === "scroll") {
-      const cssWidth = Math.max(container.clientWidth, 600);
-      const cssHeight = cssWidth / imgAspect;
-
-      const ctx = prepareContext(canvas, container, cssWidth, cssHeight);
-      if (!ctx) return;
-
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, cssWidth, cssHeight);
-
-      drawRotatedImage(
-        ctx,
-        img,
-        cssWidth / 2,
-        cssHeight / 2,
-        cssWidth,
-        cssHeight,
-        rotation,
-      );
-    } else {
-      const cssWidth = container.clientWidth;
-      const cssHeight = container.clientHeight;
-
-      const ctx = prepareContext(canvas, container, cssWidth, cssHeight);
-      if (!ctx) return;
-
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, cssWidth, cssHeight);
-
-      const containerAspect = cssWidth / cssHeight;
-      const drawWidth =
-        imgAspect > containerAspect ? cssWidth : cssHeight * imgAspect;
-      const drawHeight =
-        imgAspect > containerAspect ? cssWidth / imgAspect : cssHeight;
-
-      const cx = cssWidth / 2;
-      const cy = cssHeight / 2;
-
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.scale(scale, scale);
-      ctx.translate(-cx + translateX, -cy + translateY);
-
-      drawRotatedImage(ctx, img, cx, cy, drawWidth, drawHeight, rotation);
-
-      ctx.restore();
-    }
-  }
-
-  $effect(() => {
-    if (!modalContent?.imageBlob || !canvasElement || !containerElement) {
-      imageLoaded = false;
-      loadedImage = null;
-      return;
-    }
-
-    scale = 1;
-    translateX = 0;
-    translateY = 0;
-    rotation = 0;
-    imageLoaded = false;
-    loadedImage = null;
-
-    const url = URL.createObjectURL(modalContent.imageBlob);
-    const img = new Image();
-
-    img.onload = () => {
-      activeAnnotationStroke = null;
-      loadedImage = img;
-      imageLoaded = true;
-      URL.revokeObjectURL(url);
-    };
-
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      imageLoaded = false;
-      loadedImage = null;
-    };
-
-    img.src = url;
-  });
-
-  $effect(() => {
-    if (!imageLoaded || !loadedImage) return;
-    const _ = [scale, translateX, translateY, viewMode, rotation];
-    void _;
-    renderCanvas();
-  });
-
-  $effect(() => {
-    if (!isOpen || !containerElement) return;
-
-    const observer = new ResizeObserver(() => {
-      renderCanvas();
-    });
-
-    observer.observe(containerElement);
-
-    return () => observer.disconnect();
-  });
-
-  // ---------------------------------------------------------------------------
-  // Input handlers — panning, zooming, rotation, keyboard bindings
-  // ---------------------------------------------------------------------------
-
-  function handleWheel(e: WheelEvent): void {
-    if (viewMode !== "fit") return;
-    e.preventDefault();
-    scale = Math.max(0.5, Math.min(5, scale - e.deltaY * 0.001));
-  }
-
-  function handlePointerDown(e: PointerEvent): void {
-    if (!annotationMode || !e.isPrimary || e.button !== 0) return;
-    const point = getCanvasPoint(e.clientX, e.clientY);
-    const key = getAnnotationKey();
-    const img = loadedImage;
-    if (
-      !point ||
-      !key ||
-      !img ||
-      point.imageX < 0 ||
-      point.imageY < 0 ||
-      point.imageX > img.width ||
-      point.imageY > img.height
-    ) {
-      return;
-    }
-
-    e.preventDefault();
-    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-    const stroke: AnnotationStroke = {
-      points: [{ x: point.imageX, y: point.imageY }],
-      width: 3 * point.imageUnitsPerPixel,
-    };
-    annotations[key] = [...(annotations[key] ?? []), stroke];
-    activeAnnotationStroke = stroke;
-    annotationStartY = e.clientY;
-    renderCanvas();
-  }
-
-  function handlePointerMove(e: PointerEvent): void {
-    if (!annotationMode || !activeAnnotationStroke) return;
-    const point = getCanvasPoint(
-      e.clientX,
-      e.clientY,
-      e.shiftKey ? annotationStartY : undefined,
-    );
-    const img = loadedImage;
-    const key = getAnnotationKey();
-    if (!point || !img || !key) return;
-
-    const strokes = annotations[key];
-    const stroke = strokes?.[strokes.length - 1];
-    if (!stroke) return;
-    const last = stroke.points.at(-1);
-    const nextPoint = {
-      x: Math.max(0, Math.min(img.width, point.imageX)),
-      y: Math.max(0, Math.min(img.height, point.imageY)),
-    };
-    if (!last || Math.hypot(nextPoint.x - last.x, nextPoint.y - last.y) >= 1) {
-      stroke.points = [...stroke.points, nextPoint];
-      renderCanvas();
-    }
-  }
-
-  function handlePointerUp(e: PointerEvent): void {
-    if (activeAnnotationStroke) {
-      activeAnnotationStroke = null;
-      const target = e.currentTarget as HTMLDivElement;
-      if (target.hasPointerCapture(e.pointerId)) {
-        target.releasePointerCapture(e.pointerId);
-      }
-    }
-  }
-
-  function handleMouseDown(e: MouseEvent): void {
-    // Let the browser handle text selection anywhere inside the text layer,
-    // including the gaps between words, instead of starting a pan drag.
-    if (
-      annotationMode ||
-      (e.target as HTMLElement).closest(".selectable-text-layer")
-    ) {
-      return;
-    }
-
-    if (viewMode !== "fit") return;
-    isDragging = true;
-    dragStartX = e.clientX - translateX;
-    dragStartY = e.clientY - translateY;
-  }
-
-  function handleMouseMove(e: MouseEvent): void {
-    if (annotationMode || viewMode !== "fit" || !isDragging) return;
-    translateX = e.clientX - dragStartX;
-    translateY = e.clientY - dragStartY;
-  }
-
-  function handleMouseUp(): void {
-    isDragging = false;
-  }
-
-  function handleTouchStart(e: TouchEvent): void {
-    if (annotationMode || textSelectionMode) return;
-    if (viewMode !== "fit") return;
-
-    if (e.touches.length === 2) {
-      e.preventDefault();
-      lastTouchDistance = Math.hypot(
-        e.touches[1].clientX - e.touches[0].clientX,
-        e.touches[1].clientY - e.touches[0].clientY,
-      );
-    } else if (e.touches.length === 1) {
-      isDragging = true;
-      dragStartX = e.touches[0].clientX - translateX;
-      dragStartY = e.touches[0].clientY - translateY;
-    }
-  }
-
-  function handleTouchMove(e: TouchEvent): void {
-    if (annotationMode || textSelectionMode) return;
-    if (viewMode !== "fit") return;
-
-    if (e.touches.length === 2) {
-      e.preventDefault();
-      const distance = Math.hypot(
-        e.touches[1].clientX - e.touches[0].clientX,
-        e.touches[1].clientY - e.touches[0].clientY,
-      );
-      if (lastTouchDistance > 0) {
-        scale = Math.max(
-          0.5,
-          Math.min(5, scale + (distance - lastTouchDistance) * 0.01),
-        );
-      }
-      lastTouchDistance = distance;
-    } else if (e.touches.length === 1 && isDragging) {
-      e.preventDefault();
-      translateX = e.touches[0].clientX - dragStartX;
-      translateY = e.touches[0].clientY - dragStartY;
-    }
-  }
-
-  function handleTouchEnd(e: TouchEvent): void {
-    if (e.touches.length < 2) lastTouchDistance = 0;
-    if (e.touches.length === 0) isDragging = false;
-  }
-
-  function resetTransform(): void {
-    scale = 1;
-    translateX = 0;
-    translateY = 0;
-  }
-
-  function toggleViewMode(): void {
-    viewMode = viewMode === "fit" ? "scroll" : "fit";
-    if (viewMode === "fit") resetTransform();
-  }
-
-  function rotateImage(): void {
-    rotation = (rotation + 90) % 360;
-  }
-
-  function undoAnnotation(): void {
-    const key = getAnnotationKey();
-    if (!key) return;
-    annotations[key]?.pop();
-    activeAnnotationStroke = null;
-    renderCanvas();
-  }
-
-  // Keyboard shortcuts
-  $effect(() => {
-    if (!isOpen) return;
-
-    const handleKeydown = (e: KeyboardEvent): void => {
-      const target = e.target as HTMLElement;
-      if (
-        target.tagName === "INPUT" &&
-        !target.classList.contains("page-jump-input")
-      ) {
-        return;
-      }
-
-      switch (e.key) {
-        case "Escape":
-          if (showPageInput) {
-            showPageInput = false;
-            pageInputValue = "";
-          } else {
-            onClose();
-          }
-          break;
-        case "ArrowLeft":
-          e.preventDefault();
-          viewPrevPage();
-          break;
-        case "ArrowRight":
-          e.preventDefault();
-          viewNextPage();
-          break;
-        case "g":
-          if (!showPageInput) {
-            e.preventDefault();
-            togglePageInput();
-          }
-          break;
-        case "r":
-          e.preventDefault();
-          if (e.shiftKey) rotateImage();
-          else resetTransform();
-          break;
-        case "R":
-          e.preventDefault();
-          rotateImage();
-          break;
-        case "v":
-          e.preventDefault();
-          toggleViewMode();
-          break;
-        case "+":
-        case "=":
-          if (viewMode === "fit") {
-            e.preventDefault();
-            scale = Math.min(5, scale + 0.2);
-          }
-          break;
-        case "-":
-          if (viewMode === "fit") {
-            e.preventDefault();
-            scale = Math.max(0.5, scale - 0.2);
-          }
-          break;
-      }
-    };
-
-    document.addEventListener("keydown", handleKeydown);
-    return () => document.removeEventListener("keydown", handleKeydown);
-  });
-
-  // ---------------------------------------------------------------------------
-  // Page navigation
-  // ---------------------------------------------------------------------------
-
-  const navigateToPage = (
-    fileId: number,
-    pageNum: number,
-    numPages: number,
-    fileName: string,
-  ): void => {
-    const scrollContainer = containerElement?.parentElement;
-    if (scrollContainer) scrollContainer.scrollTop = 0;
-    viewPage(fileId, pageNum, numPages, fileName);
-  };
-
-  const viewPrevPage = (): void => {
-    if (!modalContent || modalContent.page === 1) return;
-    navigateToPage(
-      modalContent.file_id,
-      modalContent.page - 1,
-      modalContent.num_pages,
-      modalContent.filename,
-    );
-  };
-
-  const viewNextPage = (): void => {
-    if (!modalContent || modalContent.page === modalContent.num_pages) return;
-    navigateToPage(
-      modalContent.file_id,
-      modalContent.page + 1,
-      modalContent.num_pages,
-      modalContent.filename,
-    );
-  };
-
-  const handlePageJump = (): void => {
-    if (!modalContent) return;
-
-    const pageNum = parseInt(pageInputValue, 10);
-    if (isNaN(pageNum) || pageNum < 1 || pageNum > modalContent.num_pages) {
-      pageInputValue = "";
-      showPageInput = false;
-      return;
-    }
-
-    navigateToPage(
-      modalContent.file_id,
-      pageNum,
-      modalContent.num_pages,
-      modalContent.filename,
-    );
-
-    pageInputValue = "";
-    showPageInput = false;
-  };
-
-  const togglePageInput = (): void => {
-    showPageInput = !showPageInput;
-    if (showPageInput) {
-      pageInputValue = "";
-      setTimeout(() => {
-        (
-          document.querySelector(".page-jump-input") as HTMLInputElement
-        )?.focus();
-      }, 0);
-    }
-  };
-
-  // ---------------------------------------------------------------------------
-  // Search
-  // ---------------------------------------------------------------------------
-
-  function highlightText(text: string): string {
-    return text
-      .replace(/<b>/g, "<mark>")
-      .replace(/<\/b>/g, "</mark>")
-      .replace(/\n/g, "<br/>")
-      .replace(/<\/mark>\s*<mark>/g, " ");
-  }
-
-  async function runSearch(query: string): Promise<void> {
-    if (!query || !modalContent || query.length < 2) {
-      searchResults = { results: [] };
-      searchError = null;
-      return;
-    }
-
-    isSearching = true;
-    searchError = null;
-
-    try {
-      searchResults = await searchAPI(query, { fileId: modalContent.file_id });
-    } catch (error: unknown) {
-      searchError = (error as Error).message;
-      searchResults = { results: [] };
-    } finally {
-      isSearching = false;
-    }
-  }
-
-  function handleSearchInput(e: Event): void {
-    const value = (e.currentTarget as HTMLInputElement).value;
-    searchQuery = value;
-
-    clearTimeout(searchDebounceTimer);
-
-    if (!value || value.length < 2) {
-      searchResults = { results: [] };
-      searchError = null;
-      return;
-    }
-
-    searchDebounceTimer = setTimeout(() => runSearch(value), 300);
-  }
-
-  function handleSearchSubmit(): void {
-    clearTimeout(searchDebounceTimer);
-    runSearch(searchQuery);
-  }
-
-  function clearSearch(): void {
-    clearTimeout(searchDebounceTimer);
-    searchQuery = "";
-    searchResults = { results: [] };
-    searchError = null;
-  }
-
-  const handleResultClick = (result: SearchResult): void => {
-    navigateToPage(
-      result.file_id,
-      result.page_num,
-      result.num_pages,
-      result.file_name,
-    );
-    clearSearch();
-    showMobileSearch = false;
-  };
-
-  const dropdownVisible = $derived(
-    searchQuery.length > 0 &&
-      (isSearching || !!searchError || searchResults.results.length > 0),
-  );
 </script>
 
 {#if isOpen && modalContent}
@@ -1473,7 +68,7 @@
             <div class="control-group">
               <button
                 class="icon-btn"
-                onclick={viewPrevPage}
+                onclick={modal.nav.viewPrevPage}
                 disabled={modalContent.page === 1}
                 aria-label="Previous page"
                 title="Previous (←)"
@@ -1491,18 +86,18 @@
                 </svg>
               </button>
 
-              {#if showPageInput}
+              {#if modal.nav.showPageInput}
                 <form
                   class="page-jump-form"
                   onsubmit={(e: Event) => {
                     e.preventDefault();
-                    handlePageJump();
+                    modal.nav.handlePageJump();
                   }}
                 >
                   <input
                     type="number"
                     class="page-jump-input"
-                    bind:value={pageInputValue}
+                    bind:value={modal.nav.pageInputValue}
                     placeholder={modalContent.page.toString()}
                     min="1"
                     max={modalContent.num_pages}
@@ -1513,7 +108,7 @@
               {:else}
                 <button
                   class="page-indicator"
-                  onclick={togglePageInput}
+                  onclick={modal.nav.togglePageInput}
                   title="Jump to page (g)"
                   aria-label="Jump to page"
                   type="button"
@@ -1524,7 +119,7 @@
 
               <button
                 class="icon-btn"
-                onclick={viewNextPage}
+                onclick={modal.nav.viewNextPage}
                 disabled={modalContent.page === modalContent.num_pages}
                 aria-label="Next page"
                 title="Next (→)"
@@ -1544,16 +139,16 @@
             </div>
           {/if}
 
-          {#if imageLoaded}
+          {#if modal.canvas.imageLoaded}
             <!-- Text View Panel Toggle -->
             <button
               class="icon-btn"
-              class:icon-btn--active={renderTextSetting.value}
-              onclick={() => renderTextSetting.set(!renderTextSetting.value)}
-              aria-label={renderTextSetting.value
+              class:icon-btn--active={modal.text.renderTextSetting.value}
+              onclick={() => modal.text.renderTextSetting.set(!modal.text.renderTextSetting.value)}
+              aria-label={modal.text.renderTextSetting.value
                 ? "Hide text panel"
                 : "Show text panel"}
-              title={renderTextSetting.value
+              title={modal.text.renderTextSetting.value
                 ? "Hide text panel"
                 : "Show text panel"}
               type="button"
@@ -1575,7 +170,7 @@
             <!-- Rotate -->
             <button
               class="icon-btn"
-              onclick={rotateImage}
+              onclick={modal.canvas.rotateImage}
               aria-label="Rotate 90°"
               title="Rotate (Shift+R)"
               type="button"
@@ -1597,17 +192,17 @@
             <!-- View mode toggle -->
             <button
               class="icon-btn"
-              class:icon-btn--active={viewMode === "fit"}
-              onclick={toggleViewMode}
-              aria-label={viewMode === "scroll"
+              class:icon-btn--active={modal.canvas.viewMode === "fit"}
+              onclick={modal.canvas.toggleViewMode}
+              aria-label={modal.canvas.viewMode === "scroll"
                 ? "Switch to zoom mode"
                 : "Switch to scroll mode"}
-              title={viewMode === "scroll"
+              title={modal.canvas.viewMode === "scroll"
                 ? "Zoom mode (v)"
                 : "Scroll mode (v)"}
               type="button"
             >
-              {#if viewMode === "scroll"}
+              {#if modal.canvas.viewMode === "scroll"}
                 <svg
                   width="16"
                   height="16"
@@ -1639,11 +234,11 @@
             </button>
 
             <!-- Zoom controls (fit mode only) -->
-            {#if viewMode === "fit"}
+            {#if modal.canvas.viewMode === "fit"}
               <div class="control-group">
                 <button
                   class="icon-btn"
-                  onclick={() => (scale = Math.max(0.5, scale - 0.2))}
+                  onclick={() => (modal.canvas.scale = Math.max(0.5, modal.canvas.scale - 0.2))}
                   aria-label="Zoom out"
                   title="Zoom out (-)"
                   type="button"
@@ -1661,10 +256,10 @@
                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                   </svg>
                 </button>
-                <span class="zoom-label">{Math.round(scale * 100)}%</span>
+                <span class="zoom-label">{Math.round(modal.canvas.scale * 100)}%</span>
                 <button
                   class="icon-btn"
-                  onclick={() => (scale = Math.min(5, scale + 0.2))}
+                  onclick={() => (modal.canvas.scale = Math.min(5, modal.canvas.scale + 0.2))}
                   aria-label="Zoom in"
                   title="Zoom in (+)"
                   type="button"
@@ -1690,13 +285,13 @@
 
         <!-- Right: search + close -->
         <div class="header-right">
-          {#if imageLoaded}
+          {#if modal.canvas.imageLoaded}
             <button
               class="icon-btn text-selection-toggle"
-              class:icon-btn--active={textSelectionMode}
-              onclick={toggleTextSelection}
-              aria-pressed={textSelectionMode}
-              aria-label={textSelectionMode
+              class:icon-btn--active={modal.text.textSelectionMode}
+              onclick={modal.toggleTextSelection}
+              aria-pressed={modal.text.textSelectionMode}
+              aria-label={modal.text.textSelectionMode
                 ? "Stop selecting text"
                 : "Select text on page"}
               title="Select text on page"
@@ -1706,26 +301,22 @@
             </button>
             <button
               class="icon-btn annotation-toggle"
-              class:icon-btn--active={annotationMode}
-              onclick={() => {
-                annotationMode = !annotationMode;
-                textSelectionMode = false;
-                activeAnnotationStroke = null;
-              }}
-              aria-pressed={annotationMode}
-              aria-label={annotationMode ? "Stop annotating" : "Annotate page"}
-              title={annotationMode
+              class:icon-btn--active={modal.canvas.annotationMode}
+              onclick={modal.toggleAnnotation}
+              aria-pressed={modal.canvas.annotationMode}
+              aria-label={modal.canvas.annotationMode ? "Stop annotating" : "Annotate page"}
+              title={modal.canvas.annotationMode
                 ? "Stop annotating"
                 : "Annotate page (hold Shift while drawing for a horizontal line)"}
               type="button"
             >
               A
             </button>
-            {#if annotationMode}
+            {#if modal.canvas.annotationMode}
               <button
                 class="icon-btn annotation-undo"
-                onclick={undoAnnotation}
-                disabled={(annotations[getAnnotationKey() ?? ""] ?? [])
+                onclick={modal.canvas.undoAnnotation}
+                disabled={(modal.canvas.annotations[modal.canvas.annotationKey() ?? ""] ?? [])
                   .length === 0}
                 aria-label="Undo last annotation stroke"
                 title="Undo last stroke"
@@ -1737,7 +328,7 @@
           {/if}
 
           <!-- In-document search widget -->
-          <div class="search-wrapper" class:mobile-active={showMobileSearch}>
+          <div class="search-wrapper" class:mobile-active={modal.search.showMobileSearch}>
             <div class="search-field-wrap">
               <svg
                 class="search-field-icon"
@@ -1756,20 +347,20 @@
                 type="text"
                 class="search-field"
                 placeholder="Search in document…"
-                value={searchQuery}
-                oninput={handleSearchInput}
+                value={modal.search.searchQuery}
+                oninput={modal.search.handleSearchInput}
                 onkeydown={(e: KeyboardEvent) => {
-                  if (e.key === "Enter") handleSearchSubmit();
-                  if (e.key === "Escape") clearSearch();
+                  if (e.key === "Enter") modal.search.handleSearchSubmit();
+                  if (e.key === "Escape") modal.search.clearSearch();
                 }}
                 aria-label="Search inside document"
                 spellcheck="false"
                 autocomplete="off"
               />
-              {#if searchQuery}
+              {#if modal.search.searchQuery}
                 <button
                   class="search-clear"
-                  onclick={clearSearch}
+                  onclick={modal.search.clearSearch}
                   type="button"
                   aria-label="Clear search"
                 >
@@ -1792,12 +383,12 @@
               {/if}
             </div>
 
-            {#if showMobileSearch}
+            {#if modal.search.showMobileSearch}
               <button
                 class="mobile-search-cancel"
                 onclick={() => {
-                  showMobileSearch = false;
-                  clearSearch();
+                  modal.search.showMobileSearch = false;
+                  modal.search.clearSearch();
                 }}
                 type="button"
               >
@@ -1806,18 +397,18 @@
             {/if}
 
             <!-- Results dropdown -->
-            {#if dropdownVisible}
+            {#if modal.search.dropdownVisible}
               <div
                 class="search-dropdown"
                 role="listbox"
                 aria-label="Search results"
               >
-                {#if isSearching}
+                {#if modal.search.isSearching}
                   <div class="dropdown-status">
                     <div class="dropdown-spinner"></div>
                     Searching…
                   </div>
-                {:else if searchError}
+                {:else if modal.search.searchError}
                   <div class="dropdown-status dropdown-status--error">
                     <svg
                       width="14"
@@ -1835,29 +426,29 @@
                         y2="12"
                       />
                     </svg>
-                    {searchError}
+                    {modal.search.searchError}
                   </div>
-                {:else if searchResults.results.length === 0}
+                {:else if modal.search.searchResults.results.length === 0}
                   <div class="dropdown-status">No results found</div>
                 {:else}
                   <div class="dropdown-header">
-                    {searchResults.results.length}
-                    {searchResults.results.length === 1 ? "result" : "results"}
+                    {modal.search.searchResults.results.length}
+                    {modal.search.searchResults.results.length === 1 ? "result" : "results"}
                   </div>
                   <ul class="dropdown-list">
-                    {#each searchResults.results as result (result.file_id + "-" + result.page_num)}
+                    {#each modal.search.searchResults.results as result (result.file_id + "-" + result.page_num)}
                       <!-- svelte-ignore a11y_click_events_have_key_events -->
                       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
                       <li
                         class="dropdown-item"
-                        onclick={() => handleResultClick(result)}
+                        onclick={() => modal.search.handleResultClick(result)}
                         role="option"
                         aria-selected="false"
                       >
                         <span class="dropdown-page">Page {result.page_num}</span
                         >
                         <p class="dropdown-snippet">
-                          {@html highlightText(result.snippet)}
+                          {@html modal.search.highlightText(result.snippet)}
                         </p>
                       </li>
                     {/each}
@@ -1870,7 +461,7 @@
           <!-- Mobile: search trigger -->
           <button
             class="icon-btn mobile-only"
-            onclick={() => (showMobileSearch = true)}
+            onclick={() => (modal.search.showMobileSearch = true)}
             aria-label="Search inside document"
             type="button"
           >
@@ -1915,7 +506,7 @@
       </div>
 
       <!-- ── Canvas viewport ── -->
-      <div class="modal-body" class:scroll-mode={viewMode === "scroll"}>
+      <div class="modal-body" class:scroll-mode={modal.canvas.viewMode === "scroll"}>
         {#if modalContent.error}
           <div class="render-error">
             <svg
@@ -1940,52 +531,52 @@
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="canvas-container"
-            class:scroll-mode={viewMode === "scroll"}
-            class:text-selection-mode={textSelectionMode}
-            bind:this={containerElement}
-            onwheel={handleWheel}
-            onpointerdown={handlePointerDown}
-            onpointermove={handlePointerMove}
-            onpointerup={handlePointerUp}
-            onpointercancel={handlePointerUp}
-            onmousedown={handleMouseDown}
-            onmousemove={handleMouseMove}
-            onmouseup={handleMouseUp}
-            onmouseleave={handleMouseUp}
-            ontouchstart={handleTouchStart}
-            ontouchmove={handleTouchMove}
-            ontouchend={handleTouchEnd}
+            class:scroll-mode={modal.canvas.viewMode === "scroll"}
+            class:text-selection-mode={modal.text.textSelectionMode}
+            bind:this={modal.canvas.containerElement}
+            onwheel={modal.canvas.handleWheel}
+            onpointerdown={modal.canvas.handlePointerDown}
+            onpointermove={modal.canvas.handlePointerMove}
+            onpointerup={modal.canvas.handlePointerUp}
+            onpointercancel={modal.canvas.handlePointerUp}
+            onmousedown={modal.canvas.handleMouseDown}
+            onmousemove={modal.canvas.handleMouseMove}
+            onmouseup={modal.canvas.handleMouseUp}
+            onmouseleave={modal.canvas.handleMouseUp}
+            ontouchstart={modal.canvas.handleTouchStart}
+            ontouchmove={modal.canvas.handleTouchMove}
+            ontouchend={modal.canvas.handleTouchEnd}
           >
             <canvas
-              bind:this={canvasElement}
+              bind:this={modal.canvas.canvasElement}
               class="page-canvas"
-              class:annotation-mode={annotationMode}
-              class:dragging={isDragging}
-              class:fit-mode={viewMode === "fit"}
+              class:annotation-mode={modal.canvas.annotationMode}
+              class:dragging={modal.canvas.isDragging}
+              class:fit-mode={modal.canvas.viewMode === "fit"}
             ></canvas>
 
-            {#if textSelectionMode && textLayer}
+            {#if modal.text.textSelectionMode && modal.text.textLayer}
               <div
                 class="selectable-text-layer"
-                class:annotation-disabled={annotationMode}
-                bind:this={textLayerElement}
-                style={textLayerStyle()}
+                class:annotation-disabled={modal.canvas.annotationMode}
+                bind:this={modal.text.textLayerElement}
+                style={modal.text.textLayerStyle()}
                 aria-label="Selectable page text"
-                oncopy={handleSelectableTextCopy}
+                oncopy={modal.text.handleSelectableTextCopy}
               >
-                {#each textLayerColumns as column, columnIndex (columnIndex)}
+                {#each modal.text.textLayerColumns as column, columnIndex (columnIndex)}
                   <div
                     class="selectable-column"
-                    style={selectableColumnStyle(column)}
+                    style={modal.text.selectableColumnStyle(column)}
                   >
                     {#each column.lines as line, lineIndex (lineIndex)}
                       <div
                         class="selectable-line"
-                        style={selectableLineStyle(column, line, lineIndex)}
+                        style={modal.text.selectableLineStyle(column, line, lineIndex)}
                       >
                         {#each line.words as word, wordIndex (wordIndex)}{#if wordIndex > 0}<span
                               class="selectable-gap"
-                              style={selectableGapStyle(line, wordIndex)}
+                              style={modal.text.selectableGapStyle(line, wordIndex)}
                               >{" "}</span
                             >{/if}<span
                             class="selectable-word"
@@ -1995,7 +586,7 @@
                             data-right={word.r}
                             data-bottom={word.b}
                             data-top={word.t}
-                            style={selectableWordStyle(word, line)}
+                            style={modal.text.selectableWordStyle(word, line)}
                             ><span class="selectable-word-text"
                               >{word.text}</span
                             ></span
@@ -2006,15 +597,15 @@
                 {/each}
               </div>
             {/if}
-            {#if textSelectionMode && (textLayerLoading || textLayerError)}
+            {#if modal.text.textSelectionMode && (modal.text.textLayerLoading || modal.text.textLayerError)}
               <div class="text-layer-status" role="status">
-                {#if textLayerLoading}
+                {#if modal.text.textLayerLoading}
                   Preparing selectable text…
                 {:else}
-                  Could not load selectable text: {textLayerError}
+                  Could not load selectable text: {modal.text.textLayerError}
                   <button
                     class="plain-text-btn"
-                    onclick={() => (textLayerReload += 1)}
+                    onclick={() => (modal.text.textLayerReload += 1)}
                     type="button"
                   >
                     Retry
@@ -2023,14 +614,14 @@
               </div>
             {/if}
 
-            {#if !imageLoaded}
+            {#if !modal.canvas.imageLoaded}
               <div class="canvas-loading">
                 <div class="canvas-spinner"></div>
               </div>
             {/if}
           </div>
           <!-- Reconstructed Plain Text View Overlay -->
-          {#if renderTextSetting.value && pageText && !annotationMode && !textSelectionMode}
+          {#if modal.text.renderTextSetting.value && modal.text.pageText && !modal.canvas.annotationMode && !modal.text.textSelectionMode}
             <div class="plain-text-container">
               <div class="plain-text-header">
                 <span class="plain-text-title"
@@ -2039,14 +630,14 @@
                 <div class="plain-text-actions">
                   <button
                     class="plain-text-btn"
-                    onclick={copyToClipboard}
+                    onclick={modal.text.copyToClipboard}
                     type="button"
                   >
-                    {copySuccess ? "Copied" : "Copy Text"}
+                    {modal.text.copySuccess ? "Copied" : "Copy Text"}
                   </button>
                   <button
                     class="plain-text-btn plain-text-btn--close"
-                    onclick={() => renderTextSetting.set(false)}
+                    onclick={() => modal.text.renderTextSetting.set(false)}
                     type="button"
                   >
                     Dismiss
@@ -2054,7 +645,7 @@
                 </div>
               </div>
               <div class="plain-text-content">
-                {pageText}
+                {modal.text.pageText}
               </div>
             </div>
           {/if}
@@ -2062,7 +653,7 @@
       </div>
 
       <!-- ── Mobile HUD ── -->
-      {#if imageLoaded && modalContent.num_pages > 1}
+      {#if modal.canvas.imageLoaded && modalContent.num_pages > 1}
         <div
           class="mobile-hud mobile-only"
           role="toolbar"
@@ -2070,7 +661,7 @@
         >
           <button
             class="hud-btn"
-            onclick={viewPrevPage}
+            onclick={modal.nav.viewPrevPage}
             disabled={modalContent.page === 1}
             aria-label="Previous page"
             type="button"
@@ -2088,18 +679,18 @@
           </button>
 
           <div class="hud-center">
-            {#if showPageInput}
+            {#if modal.nav.showPageInput}
               <form
                 class="hud-form"
                 onsubmit={(e: Event) => {
                   e.preventDefault();
-                  handlePageJump();
+                  modal.nav.handlePageJump();
                 }}
               >
                 <input
                   type="number"
                   class="hud-input"
-                  bind:value={pageInputValue}
+                  bind:value={modal.nav.pageInputValue}
                   placeholder={modalContent.page.toString()}
                   min="1"
                   max={modalContent.num_pages}
@@ -2107,7 +698,7 @@
                 />
               </form>
             {:else}
-              <button class="hud-page" onclick={togglePageInput} type="button">
+              <button class="hud-page" onclick={modal.nav.togglePageInput} type="button">
                 {modalContent.page} / {modalContent.num_pages}
               </button>
             {/if}
@@ -2116,8 +707,8 @@
           <div class="hud-actions">
             <button
               class="hud-action"
-              class:icon-btn--active={renderTextSetting.value}
-              onclick={() => renderTextSetting.set(!renderTextSetting.value)}
+              class:icon-btn--active={modal.text.renderTextSetting.value}
+              onclick={() => modal.text.renderTextSetting.set(!modal.text.renderTextSetting.value)}
               aria-label="Toggle text overlay"
               type="button"
             >
@@ -2136,7 +727,7 @@
             </button>
             <button
               class="hud-action"
-              onclick={rotateImage}
+              onclick={modal.canvas.rotateImage}
               aria-label="Rotate"
               type="button"
             >
@@ -2155,11 +746,11 @@
             </button>
             <button
               class="hud-action"
-              onclick={toggleViewMode}
+              onclick={modal.canvas.toggleViewMode}
               aria-label="Toggle view mode"
               type="button"
             >
-              {#if viewMode === "scroll"}
+              {#if modal.canvas.viewMode === "scroll"}
                 <svg
                   width="16"
                   height="16"
@@ -2193,7 +784,7 @@
 
           <button
             class="hud-btn"
-            onclick={viewNextPage}
+            onclick={modal.nav.viewNextPage}
             disabled={modalContent.page === modalContent.num_pages}
             aria-label="Next page"
             type="button"
