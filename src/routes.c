@@ -1,8 +1,10 @@
 #include <lexicon/lexicon_pdf.h>
 #include <malloc.h>
+#include <math.h>
 #include <pulsar/error.h>
 #include <solidc/defer.h>
 #include <solidc/str_to_num.h>
+#include <tesseract/capi.h>
 #include <vfs.h>
 
 #include "../include/database.h"
@@ -43,22 +45,26 @@ bool gen_open_document(pdf_document_t* doc, const char* path, int* num_pages, vo
 }
 
 /**
- * Sends a JSON-encoded error body with HTTP 400 Bad Request.
+ * Sends a JSON-encoded error body using the requested HTTP status.
  *
  * @param conn PulsarConn to write the response to.
  * @param msg  Human-readable error message; must be NUL-terminated.
  */
-static inline void send_json_error(PulsarConn* conn, const char* msg) {
+static inline void send_json_error_status(PulsarConn* conn, http_status status, const char* msg) {
     yyjson_alc alc;
     yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
 
     size_t outlen;
     char* err_str = json_create_error(&alc, msg, &outlen);
     if (err_str) {
-        conn_send_json(conn, StatusBadRequest, err_str, outlen);
+        conn_send_json(conn, status, err_str, outlen);
     } else {
         conn_send_json(conn, StatusInternalServerError, "{\"error\":\"Internal error\"}", 26);
     }
+}
+
+static inline void send_json_error(PulsarConn* conn, const char* msg) {
+    send_json_error_status(conn, StatusBadRequest, msg);
 }
 
 /**
@@ -199,20 +205,166 @@ void render_pdfpage_as_image(PulsarCtx* ctx) {
 /**
  * GET /files/:file_id/pages/:page_num/text-layer
  *
- * Returns per-character bounding boxes for a PDF page, for building a
- * selectable text overlay on top of a separately-rendered image. Boxes
- * are in PDF point space; the client must scale them using the same
- * `scale` factor passed to the render endpoint.
+ * Returns word-level boxes in PDF point space. Embedded text is used when
+ * available; scanned pages are OCRed once and cached in PostgreSQL.
  */
+static _Thread_local TessBaseAPI* worker_ocr_api;
+static _Thread_local bool worker_ocr_init_attempted;
+
+static TessBaseAPI* get_worker_ocr_api(void) {
+    if (worker_ocr_init_attempted) return worker_ocr_api;
+    worker_ocr_init_attempted = true;
+
+    worker_ocr_api = TessBaseAPICreate();
+    if (!worker_ocr_api) return NULL;
+
+    const char* language = getenv("LEXICON_OCR_LANGUAGE");
+    if (!language || !*language) language = "eng";
+    if (TessBaseAPIInit3(worker_ocr_api, NULL, language) != 0) {
+        TessBaseAPIDelete(worker_ocr_api);
+        worker_ocr_api = NULL;
+        return NULL;
+    }
+
+    TessBaseAPISetPageSegMode(worker_ocr_api, PSM_AUTO);
+    TessBaseAPISetVariable(worker_ocr_api, "preserve_interword_spaces", "1");
+    return worker_ocr_api;
+}
+
+static void free_text_words(text_word_t* words, int count) {
+    if (!words) return;
+    for (int i = 0; i < count; i++) free((void*)words[i].text);
+    free(words);
+}
+
+static bool ocr_page_words(TessBaseAPI* api, const pdf_bitmap_t* bitmap, float page_width,
+                           float page_height, text_word_t** out_words, int* out_count) {
+    *out_words = NULL;
+    *out_count = 0;
+    if (bitmap->width <= 0 || bitmap->height <= 0 ||
+        (size_t)bitmap->stride < (size_t)bitmap->width * 4 ||
+        (size_t)bitmap->width > SIZE_MAX / (size_t)bitmap->height) {
+        return false;
+    }
+
+    const size_t pixel_count = (size_t)bitmap->width * (size_t)bitmap->height;
+    uint8_t* grayscale = malloc(pixel_count);
+    if (!grayscale) return false;
+    defer { free(grayscale); };
+
+    const size_t source_stride = (size_t)bitmap->stride;
+    const size_t row_width = (size_t)bitmap->width;
+    for (int y = 0; y < bitmap->height; y++) {
+        const uint8_t* src = bitmap->pixels + (size_t)y * source_stride;
+        uint8_t* dst = grayscale + (size_t)y * row_width;
+        for (int x = 0; x < bitmap->width; x++) {
+            const uint8_t* pixel = src + (size_t)x * 4;
+            dst[x] = (uint8_t)((77u * pixel[0] + 150u * pixel[1] + 29u * pixel[2]) >> 8);
+        }
+    }
+
+    TessBaseAPISetImage(api, grayscale, bitmap->width, bitmap->height, 1, bitmap->width);
+    const float source_ppi = 72.0f * (float)bitmap->width / page_width;
+    TessBaseAPISetSourceResolution(api, (int)fmaxf(70.0f, roundf(source_ppi)));
+    if (TessBaseAPIRecognize(api, NULL) != 0) {
+        TessBaseAPIClear(api);
+        return false;
+    }
+
+    TessResultIterator* iterator = TessBaseAPIGetIterator(api);
+    if (!iterator) {
+        TessBaseAPIClear(api);
+        return true;
+    }
+
+    int capacity = 0;
+    text_word_t* words = NULL;
+    const TessPageIterator* page_iterator = TessResultIteratorGetPageIteratorConst(iterator);
+    if (!page_iterator) {
+        TessBaseAPIClear(api);
+        return false;
+    }
+
+    do {
+        char* recognized = TessResultIteratorGetUTF8Text(iterator, RIL_WORD);
+        int left = 0, top = 0, right = 0, bottom = 0;
+        const bool has_box =
+            TessPageIteratorBoundingBox(page_iterator, RIL_WORD, &left, &top, &right, &bottom);
+        if (recognized && *recognized && has_box && right > left && bottom > top) {
+            if (*out_count == capacity) {
+                const int next_capacity = capacity ? capacity * 2 : 64;
+                text_word_t* resized = realloc(words, (size_t)next_capacity * sizeof(*words));
+                if (!resized) {
+                    TessDeleteText(recognized);
+                    free_text_words(words, *out_count);
+                    TessBaseAPIClear(api);
+                    return false;
+                }
+                words = resized;
+                capacity = next_capacity;
+            }
+            char* copy = strdup(recognized);
+            if (!copy) {
+                TessDeleteText(recognized);
+                free_text_words(words, *out_count);
+                TessBaseAPIClear(api);
+                return false;
+            }
+            const float x_scale = page_width / bitmap->width;
+            const float y_scale = page_height / bitmap->height;
+            words[*out_count] = (text_word_t){
+                .text = copy,
+                .left = left * x_scale,
+                .right = right * x_scale,
+                .bottom = page_height - bottom * y_scale,
+                .top = page_height - top * y_scale,
+            };
+            (*out_count)++;
+        }
+        if (recognized) TessDeleteText(recognized);
+    } while (TessResultIteratorNext(iterator, RIL_WORD));
+
+    *out_words = words;
+    TessBaseAPIClear(api);
+    return true;
+}
+
+static bool has_native_text(const pdf_char_box_t* boxes, int count) {
+    int visible_count = 0;
+    for (int i = 0; i < count; i++) {
+        const uint32_t cp = boxes[i].codepoint;
+        const bool whitespace = cp == 0x20 || (cp >= 0x09 && cp <= 0x0d) || cp == 0x00a0 ||
+                                (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 || cp == 0x2029 ||
+                                cp == 0x202f || cp == 0x205f || cp == 0x3000;
+        if (!whitespace && boxes[i].right > boxes[i].left && boxes[i].top > boxes[i].bottom &&
+            ++visible_count >= 16) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void get_pdfpage_text_layer(PulsarCtx* ctx) {
     PulsarConn* conn = ctx->conn;
     require_path_param_i64(file_id, conn, "file_id");
     require_path_param_int(page, conn, "page_num");
 
+    acquire_db(db);
+
+    static const char* cached_query =
+        "SELECT result::text FROM ocr_pages WHERE file_id=$1 AND page_num=$2 LIMIT 1";
+    const char* cache_params[] = {file_id_str, page_str};
+    run_query(cached_res, db, cached_query, 2, cache_params);
+    if (PQntuples(cached_res) == 1) {
+        const char* cached_json = PQgetvalue(cached_res, 0, 0);
+        static const char* cache_headers = "Cache-Control: public, max-age=43200\r\n";
+        conn_writeheader_raw(conn, cache_headers, strlen(cache_headers));
+        conn_send_json(conn, StatusOK, cached_json, strlen(cached_json));
+        return;
+    }
+
     static const char* query = "SELECT path FROM files WHERE id=$1 LIMIT 1";
     const char* params[] = {file_id_str};
-
-    acquire_db(db);
     run_query(res, db, query, 1, params);
     require_row(res, conn, "No file found for the requested file");
 
@@ -221,43 +373,91 @@ void get_pdfpage_text_layer(PulsarCtx* ctx) {
     require_page_in_range(page, num_pages, conn);
     open_pdf_page(ppage, doc, page - 1, conn);
 
+    const float page_width = pdf_page_width(&ppage);
+    const float page_height = pdf_page_height(&ppage);
+    if (!isfinite(page_width) || !isfinite(page_height) || page_width <= 0.0f ||
+        page_height <= 0.0f) {
+        send_json_error_status(conn, StatusInternalServerError, "Invalid PDF page dimensions");
+        return;
+    }
     pdf_text_t text = {0};
     if (pdf_text_init(&ppage, &text) != PDF_OK) {
-        send_json_error(conn, "Failed to load text layer for page");
+        send_json_error_status(conn, StatusInternalServerError,
+                               "Failed to load text layer for page");
         return;
     }
     defer { pdf_text_destroy(&text); };
 
-    yyjson_alc alc;
-    Arena* arena = conn->arena;
-    yyjson_alc_from_arena(&alc, arena);
-
-    int char_count = pdf_text_char_count(&text);
-    pdf_char_box_t* boxes = NULL;
-
-    if (char_count > 0) {
-        boxes = arena_alloc(arena, (size_t)char_count * sizeof(*boxes));
-        if (boxes == NULL) {
-            send_json_error(conn, "Out of memory extracting text layout");
-            return;
-        }
-        if (pdf_text_char_boxes(&text, 0, char_count, boxes) != PDF_OK) {
-            send_json_error(conn, "Failed to extract character boxes");
-            return;
-        }
+    const int char_count = pdf_text_char_count(&text);
+    pdf_char_box_t* boxes = char_count ? malloc((size_t)char_count * sizeof(*boxes)) : NULL;
+    if (char_count && !boxes) {
+        send_json_error_status(conn, StatusInternalServerError,
+                               "Out of memory extracting text layer");
+        return;
     }
-
-    size_t out_len = 0;
-    char* json = json_create_text_layer(&alc, pdf_page_width(&ppage), pdf_page_height(&ppage),
-                                        boxes, char_count, &out_len);
-    if (json == NULL) {
-        send_json_error(conn, "Failed to serialize text layout");
+    defer { free(boxes); };
+    if (char_count && pdf_text_char_boxes(&text, 0, char_count, boxes) != PDF_OK) {
+        send_json_error_status(conn, StatusInternalServerError, "Failed to extract text boxes");
         return;
     }
 
-    // cache for 1 hour since text layout rarely changes and is derived from the PDF itself.
-    static const char* headers =
-        "Content-Type: application/json\r\nCache-Control: public, max-age=3600\r\n";
+    yyjson_alc alc;
+    yyjson_alc_from_arena(&alc, pulsar_get_arena(conn));
+    size_t out_len = 0;
+    char* json = NULL;
+    if (has_native_text(boxes, char_count)) {
+        json = json_create_text_layer(&alc, page_width, page_height, boxes, char_count, &out_len);
+    } else {
+        TessBaseAPI* api = get_worker_ocr_api();
+        if (!api) {
+            send_json_error_status(conn, StatusServiceUnavailable,
+                                   "OCR is unavailable; install Tesseract and its language data");
+            return;
+        }
+
+        const float max_pixels = 24.0f * 1024.0f * 1024.0f;
+        const float bounded_scale = fminf(4.0f, sqrtf(max_pixels / (page_width * page_height)));
+        if (!isfinite(bounded_scale) || bounded_scale <= 0.0f) {
+            send_json_error_status(conn, StatusInternalServerError,
+                                   "Invalid PDF page dimensions for OCR");
+            return;
+        }
+
+        pdf_bitmap_t bitmap = {0};
+        if (pdf_page_render(&ppage, bounded_scale, &bitmap) != PDF_OK) {
+            send_json_error_status(conn, StatusInternalServerError,
+                                   "Failed to render page for OCR");
+            return;
+        }
+        defer { pdf_bitmap_free(&bitmap); };
+
+        text_word_t* words = NULL;
+        int word_count = 0;
+        if (!ocr_page_words(api, &bitmap, page_width, page_height, &words, &word_count)) {
+            send_json_error_status(conn, StatusInternalServerError,
+                                   "Tesseract failed to recognize page text");
+            return;
+        }
+        defer { free_text_words(words, word_count); };
+
+        json = json_create_text_layer_words(&alc, page_width, page_height, words, word_count,
+                                            &out_len);
+        if (json) {
+            static const char* save_query =
+                "INSERT INTO ocr_pages (file_id, page_num, result) "
+                "VALUES ($1, $2, $3::jsonb) "
+                "ON CONFLICT (file_id, page_num) DO UPDATE SET result=EXCLUDED.result";
+            const char* save_params[] = {file_id_str, page_str, json};
+            run_query(save_res, db, save_query, 3, save_params);
+        }
+    }
+
+    if (!json) {
+        send_json_error_status(conn, StatusInternalServerError, "Failed to serialize text layer");
+        return;
+    }
+
+    static const char* headers = "Cache-Control: public, max-age=43200\r\n";
     conn_writeheader_raw(conn, headers, strlen(headers));
     conn_write(conn, json, out_len);
 }
@@ -327,9 +527,7 @@ void pdf_search(PulsarCtx* ctx) {
 
     acquire_db(db);
 
-    PGresult* res = NULL;
-    TIME_BLOCK("pdfsearch",
-               { res = pgpool_query_params(db, full_query, param_count, params, -1); });
+    PGresult* res = pgpool_query_params(db, full_query, param_count, params, -1);
     abort_if_nullptr(res, conn, "Error running query for the search");
     defer_pqclear(res);
 

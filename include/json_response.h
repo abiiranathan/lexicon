@@ -11,6 +11,14 @@
 #include <string.h>  // for memcpy
 #include <yyjson.h>
 
+typedef struct {
+    const char* text;
+    float left;
+    float right;
+    float bottom;
+    float top;
+} text_word_t;
+
 /**
  * Builds a JSON error object: {"error": "<msg>"}.
  *
@@ -96,8 +104,8 @@ char* json_create_book_list(yyjson_alc* alc, PGresult* res, size_t* out_len);
 char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* query, size_t* out_len);
 
 /**
- * Builds a JSON text-layer object for a rendered PDF page:
- *   {"width": ..., "height": ..., "chars": [{"c":N,"l":F,"r":F,"b":F,"t":F}, ...]}
+ * Builds a word-level JSON text layer for a PDF page:
+ *   {"width": ..., "height": ..., "words": [{"text":"...", "l":F, ...}, ...]}
  *
  * Coordinates are in PDF point space, matching pdf_page_width()/height().
  *
@@ -111,5 +119,7 @@ char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* que
  */
 char* json_create_text_layer(yyjson_alc* alc, float page_width, float page_height, const pdf_char_box_t* boxes,
                              int count, size_t* out_len);
+char* json_create_text_layer_words(yyjson_alc* alc, float page_width, float page_height,
+                                   const text_word_t* words, int count, size_t* out_len);
 
 #endif  // JSON_RESPONSES_H

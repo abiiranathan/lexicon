@@ -229,40 +229,143 @@ char* json_create_search_results(yyjson_alc* alc, PGresult* res, const char* que
 
 /** Rounds a value to 2 decimal places to shrink JSON output size. */
 static inline double round2(double v) { return round(v * 100.0) / 100.0; }
+
+static bool is_text_whitespace(uint32_t codepoint) {
+    return codepoint == 0x20 || (codepoint >= 0x09 && codepoint <= 0x0d) || codepoint == 0x00a0 ||
+           (codepoint >= 0x2000 && codepoint <= 0x200a) || codepoint == 0x2028 ||
+           codepoint == 0x2029 || codepoint == 0x202f || codepoint == 0x205f || codepoint == 0x3000;
+}
+
+static size_t encode_utf8(uint32_t cp, char* out) {
+    if (cp <= 0x7f) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp <= 0x7ff) {
+        out[0] = (char)(0xc0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3f));
+        return 2;
+    }
+    if (cp <= 0xffff) {
+        out[0] = (char)(0xe0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+        out[2] = (char)(0x80 | (cp & 0x3f));
+        return 3;
+    }
+    if (cp <= 0x10ffff) {
+        out[0] = (char)(0xf0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3f));
+        out[3] = (char)(0x80 | (cp & 0x3f));
+        return 4;
+    }
+    return encode_utf8(0xfffd, out);
+}
+
 /**
- * Builds a JSON text-layer object from per-character boxes.
+ * Builds a word-level JSON text layer from per-character PDF boxes.
  *
- * @param alc         Allocator for the output buffer. See serialize_doc().
- * @param page_width  Page width in PDF points.
- * @param page_height Page height in PDF points.
- * @param boxes       Array of character boxes. May be NULL if count is 0.
- * @param count       Number of entries in @p boxes.
- * @param out_len     Set to the byte length of the returned string. May be NULL.
- * @return            JSON string. Lifetime governed by @p alc.
+ * Whitespace and geometric gaps separate words, including PDFs that encode
+ * word spacing without explicit space characters.
  */
 char* json_create_text_layer(yyjson_alc* alc, float page_width, float page_height,
                              const pdf_char_box_t* boxes, int count, size_t* out_len) {
+    if (count < 0 || (count > 0 && !boxes) || (size_t)count > (SIZE_MAX - 1) / 5) {
+        return NULL;
+    }
+    text_word_t* words = count ? calloc((size_t)count, sizeof(*words)) : NULL;
+    char* word_text = count ? malloc((size_t)count * 5 + 1) : NULL;
+    if (count && (!words || !word_text)) {
+        free(words);
+        free(word_text);
+        return NULL;
+    }
+
+    int word_count = 0;
+    size_t text_size = 0;
+    bool in_word = false;
+    text_word_t* current = NULL;
+    const pdf_char_box_t* previous = NULL;
+    for (int i = 0; i < count; i++) {
+        const pdf_char_box_t* box = &boxes[i];
+        if (is_text_whitespace(box->codepoint)) {
+            in_word = false;
+            previous = NULL;
+            continue;
+        }
+        if (box->right <= box->left || box->top <= box->bottom) {
+            in_word = false;
+            previous = NULL;
+            continue;
+        }
+
+        bool separated = false;
+        if (previous && in_word) {
+            const float previous_height = previous->top - previous->bottom;
+            const float current_height = box->top - box->bottom;
+            const float previous_center = (previous->top + previous->bottom) * 0.5f;
+            const float current_center = (box->top + box->bottom) * 0.5f;
+            const float line_threshold = fminf(previous_height, current_height) * 0.5f;
+            const float space_threshold =
+                fmaxf(1.0f, fminf(previous_height, current_height) * 0.2f);
+            const bool new_line = fabsf(current_center - previous_center) > line_threshold;
+            const float horizontal_gap = box->left >= previous->left ? box->left - previous->right
+                                                                     : previous->left - box->right;
+            separated = new_line || horizontal_gap > space_threshold;
+        }
+        if (separated) in_word = false;
+
+        if (!in_word) {
+            // Skip the NUL that terminated the previous word so it is not overwritten.
+            if (word_count > 0) text_size++;
+            current = &words[word_count++];
+            current->text = word_text + text_size;
+            current->left = box->left;
+            current->right = box->right;
+            current->bottom = box->bottom;
+            current->top = box->top;
+            in_word = true;
+        } else {
+            if (box->left < current->left) current->left = box->left;
+            if (box->right > current->right) current->right = box->right;
+            if (box->bottom < current->bottom) current->bottom = box->bottom;
+            if (box->top > current->top) current->top = box->top;
+        }
+        text_size += encode_utf8(box->codepoint, word_text + text_size);
+        word_text[text_size] = '\0';
+        previous = box;
+    }
+
+    char* result =
+        json_create_text_layer_words(alc, page_width, page_height, words, word_count, out_len);
+    free(word_text);
+    free(words);
+    return result;
+}
+
+char* json_create_text_layer_words(yyjson_alc* alc, float page_width, float page_height,
+                                   const text_word_t* words, int count, size_t* out_len) {
+    if (count < 0 || (count > 0 && !words)) return NULL;
     yyjson_mut_doc* doc = yyjson_mut_doc_new(alc);
+    if (!doc) return NULL;
     yyjson_mut_val* root = yyjson_mut_obj(doc);
     yyjson_mut_doc_set_root(doc, root);
 
     yyjson_mut_obj_add_real(doc, root, "width", round2(page_width));
     yyjson_mut_obj_add_real(doc, root, "height", round2(page_height));
 
-    yyjson_mut_val* chars_array = yyjson_mut_arr(doc);
-    yyjson_mut_obj_add_val(doc, root, "chars", chars_array);
+    yyjson_mut_val* words_array = yyjson_mut_arr(doc);
+    yyjson_mut_obj_add_val(doc, root, "words", words_array);
 
     for (int i = 0; i < count; i++) {
-        const pdf_char_box_t* b = &boxes[i];
-
-        yyjson_mut_val* box_obj = yyjson_mut_obj(doc);
-        yyjson_mut_obj_add_uint(doc, box_obj, "c", b->codepoint);
-        yyjson_mut_obj_add_real(doc, box_obj, "l", round2(b->left));
-        yyjson_mut_obj_add_real(doc, box_obj, "r", round2(b->right));
-        yyjson_mut_obj_add_real(doc, box_obj, "b", round2(b->bottom));
-        yyjson_mut_obj_add_real(doc, box_obj, "t", round2(b->top));
-
-        yyjson_mut_arr_append(chars_array, box_obj);
+        const text_word_t* word = &words[i];
+        yyjson_mut_val* word_obj = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc, word_obj, "text", word->text ? word->text : "");
+        yyjson_mut_obj_add_real(doc, word_obj, "l", round2(word->left));
+        yyjson_mut_obj_add_real(doc, word_obj, "r", round2(word->right));
+        yyjson_mut_obj_add_real(doc, word_obj, "b", round2(word->bottom));
+        yyjson_mut_obj_add_real(doc, word_obj, "t", round2(word->top));
+        yyjson_mut_arr_append(words_array, word_obj);
     }
 
     return serialize_doc(doc, alc, out_len);

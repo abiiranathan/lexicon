@@ -37,18 +37,16 @@ type ModalContentType = {
     renderParams: RenderParams;
 };
 
-type TextChar = {
-    c: number; // codepoint
-    l: number; // left
-    r: number; // right
-    b: number; // bottom
-    t: number; // top
-};
-
 type TextLayerResult = {
     width: number;
     height: number;
-    chars: TextChar[];
+    words: {
+        text: string;
+        l: number;
+        r: number;
+        b: number;
+        t: number;
+    }[];
 };
 
 

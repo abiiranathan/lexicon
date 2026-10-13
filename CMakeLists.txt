@@ -11,6 +11,7 @@ set(SERVER_WORKERS "2" CACHE STRING "Number of server worker threads")
 find_package(PkgConfig REQUIRED)
 find_package(PostgreSQL REQUIRED)
 find_package(lexicon-pdf REQUIRED)
+pkg_check_modules(TESSERACT REQUIRED IMPORTED_TARGET tesseract)
 
 # The executable needs ./ui/dist svelte frontend served at / route.
 # Build with: `cd ui` && `npm run build`
@@ -30,6 +31,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     vfs              # github.com/abiiranathan/vfs          (Virtual File System)
     pulsar           # github.com/abiiranathan/pulsar     (Robust epoll-based web server)
     lexicon::pdf     # github.com/abiiranathan/lexicon-pdf     (Robust epoll-based web server)
+    PkgConfig::TESSERACT # Tesseract OCR and Leptonica
     yyjson           # https://github.com/ibireme/yyjson  (Json serializer and parser)
     m                # libmath
     ${PostgreSQL_LIBRARIES}

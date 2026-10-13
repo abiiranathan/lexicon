@@ -18,6 +18,13 @@ static const char* schemas[] = {
     "    UNIQUE(name, path)"
     ")",
 
+    "CREATE TABLE IF NOT EXISTS ocr_pages ("
+    "    file_id BIGINT NOT NULL REFERENCES files(id) ON DELETE CASCADE, "
+    "    page_num INTEGER NOT NULL, "
+    "    result JSONB NOT NULL, "
+    "    PRIMARY KEY (file_id, page_num)"
+    ")",
+
     // Create Pages as partitioned table (hash on file_id)
     "CREATE TABLE IF NOT EXISTS pages ("
     "    id BIGSERIAL, "

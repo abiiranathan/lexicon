@@ -29,10 +29,8 @@ void render_pdfpage_as_image(PulsarCtx* ctx);
 /**
  * GET /api/file/{file_id}/text-layer/{page_num}
  *
- * Returns per-character bounding boxes for a PDF page, for building a
- * selectable text overlay on top of a separately-rendered image. Boxes
- * are in PDF point space; the client must scale them using the same
- * `scale` factor passed to the render endpoint.
+ * Returns word-level boxes in PDF point space for a selectable text overlay.
+ * Pages without embedded text are OCRed on demand and cached in PostgreSQL.
  */
 void get_pdfpage_text_layer(PulsarCtx* ctx);
 

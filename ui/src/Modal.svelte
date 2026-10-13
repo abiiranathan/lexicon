@@ -1,6 +1,6 @@
 <!-- Modal.svelte -->
 <script lang="ts">
-  import { searchAPI, fetchPageText } from "./lib/httpclient";
+  import { searchAPI, fetchPageText, fetchTextLayer } from "./lib/httpclient";
   import { useLocalStorage } from "./lib/localstorage.svelte";
 
   type ModalProps = {
@@ -23,6 +23,7 @@
   // Canvas and image state
   let canvasElement = $state<HTMLCanvasElement | null>(null);
   let containerElement = $state<HTMLDivElement | null>(null);
+  let canvasSize = $state({ width: 0, height: 0 });
   let imageLoaded = $state(false);
   let loadedImage = $state<HTMLImageElement | null>(null);
   type AnnotationPoint = { x: number; y: number };
@@ -34,6 +35,12 @@
   let annotationMode = $state(false);
   let activeAnnotationStroke: AnnotationStroke | null = null;
   let annotationStartY = 0;
+  let textSelectionMode = $state(false);
+  let textLayer = $state<TextLayerResult | null>(null);
+  let textLayerElement = $state<HTMLDivElement | null>(null);
+  let textLayerLoading = $state(false);
+  let textLayerError = $state<string | null>(null);
+  let textLayerReload = $state(0);
 
   // Text layer state
   let renderTextSetting = useLocalStorage("render-text", true);
@@ -105,6 +112,95 @@
     document.body.style.overflow = isOpen ? "hidden" : "auto";
   });
 
+  $effect(() => {
+    const reload = textLayerReload;
+    void reload;
+    if (!isOpen || !imageLoaded || !textSelectionMode || !modalContent) {
+      textLayer = null;
+      textLayerLoading = false;
+      textLayerError = null;
+      return;
+    }
+
+    let active = true;
+    textLayer = null;
+    textLayerLoading = true;
+    textLayerError = null;
+
+    fetchTextLayer(modalContent.file_id, modalContent.page)
+      .then((result) => {
+        if (active) textLayer = result;
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          textLayerError =
+            error instanceof Error ? error.message : "Unable to load page text";
+        }
+      })
+      .finally(() => {
+        if (active) textLayerLoading = false;
+      });
+
+    return () => {
+      active = false;
+    };
+  });
+
+  $effect(() => {
+    const layer = textLayerElement;
+    if (!layer) return;
+
+    const end = document.createElement("div");
+    end.className = "end-of-content";
+    layer.append(end);
+
+    const park = (): void => {
+      layer.classList.remove("selecting");
+      layer.append(end);
+    };
+
+    const onMouseDown = (): void => {
+      layer.classList.add("selecting");
+    };
+
+    const onMouseUp = (): void => park();
+
+    const onSelectionChange = (): void => {
+      if (!layer.classList.contains("selecting")) return;
+      const selection = document.getSelection();
+      if (!selection || selection.rangeCount === 0) return;
+
+      const { anchorNode, focusNode } = selection;
+      if (!anchorNode || !focusNode) return;
+
+      const focusElement =
+        focusNode instanceof Element ? focusNode : focusNode.parentElement;
+      const span = focusElement?.closest<HTMLElement>(".selectable-word");
+      if (!span || !layer.contains(span)) return;
+
+      const forward =
+        anchorNode === focusNode
+          ? selection.anchorOffset <= selection.focusOffset
+          : Boolean(
+              anchorNode.compareDocumentPosition(focusNode) &
+                Node.DOCUMENT_POSITION_FOLLOWING,
+            );
+      layer.insertBefore(end, forward ? span.nextSibling : span);
+    };
+
+    layer.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mouseup", onMouseUp);
+    document.addEventListener("selectionchange", onSelectionChange);
+
+    return () => {
+      layer.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("selectionchange", onSelectionChange);
+      layer.classList.remove("selecting");
+      end.remove();
+    };
+  });
+
   // Fetch text layer coordinates asynchronously
   $effect(() => {
     if (!isOpen || !modalContent) {
@@ -163,6 +259,193 @@
 
   const isLandscapeRotation = $derived(rotation === 90 || rotation === 270);
 
+  function textLayerLayout(): {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    transform: string;
+  } | null {
+    if (!canvasElement || !loadedImage || !containerElement) return null;
+    const canvasWidth = canvasSize.width || canvasElement.clientWidth;
+    const canvasHeight = canvasSize.height || canvasElement.clientHeight;
+    const imageWidth = isLandscapeRotation
+      ? loadedImage.height
+      : loadedImage.width;
+    const imageHeight = isLandscapeRotation
+      ? loadedImage.width
+      : loadedImage.height;
+    const aspect = imageWidth / imageHeight;
+    const containerAspect = canvasWidth / canvasHeight;
+    const drawWidth =
+      viewMode === "scroll"
+        ? canvasWidth
+        : aspect > containerAspect
+          ? canvasWidth
+          : canvasHeight * aspect;
+    const drawHeight =
+      viewMode === "scroll"
+        ? canvasHeight
+        : aspect > containerAspect
+          ? canvasWidth / aspect
+          : canvasHeight;
+
+    const pageWidth = isLandscapeRotation ? drawHeight : drawWidth;
+    const pageHeight = isLandscapeRotation ? drawWidth : drawHeight;
+    const left = canvasElement.offsetLeft + (canvasWidth - pageWidth) / 2;
+    const top = canvasElement.offsetTop + (canvasHeight - pageHeight) / 2;
+    const pageScale = viewMode === "fit" ? scale : 1;
+    const panX = viewMode === "fit" ? translateX * scale : 0;
+    const panY = viewMode === "fit" ? translateY * scale : 0;
+
+    return {
+      left,
+      top,
+      width: pageWidth,
+      height: pageHeight,
+      transform: `translate(${panX}px,${panY}px) scale(${pageScale}) rotate(${rotation}deg)`,
+    };
+  }
+
+  function textLayerStyle(): string {
+    const layout = textLayerLayout();
+    if (!layout) return "";
+    return `left:${layout.left}px;top:${layout.top}px;width:${layout.width}px;height:${layout.height}px;transform:${layout.transform}`;
+  }
+
+  let textMeasureContext: CanvasRenderingContext2D | null = null;
+
+  function selectableWordStyle(word: TextLayerResult["words"][number]): string {
+    if (!textLayer) return "";
+    const layout = textLayerLayout();
+    if (!layout) return "";
+
+    const boxHeight = ((word.t - word.b) / textLayer.height) * layout.height;
+    const boxWidth = ((word.r - word.l) / textLayer.width) * layout.width;
+    const fontSize = Math.max(1, boxHeight * 1.2);
+    textMeasureContext ??= document.createElement("canvas").getContext("2d");
+    if (textMeasureContext) {
+      textMeasureContext.font = `${fontSize}px Arial`;
+    }
+    const naturalWidth =
+      textMeasureContext?.measureText(`${word.text} `).width ?? 0;
+    const horizontalScale = naturalWidth > 0 ? boxWidth / naturalWidth : 1;
+
+    return `left:${(word.l / textLayer.width) * 100}%;top:${((textLayer.height - word.t) / textLayer.height) * 100}%;font-size:${fontSize}px;transform:scaleX(${horizontalScale})`;
+  }
+
+  function handleSelectableTextCopy(event: ClipboardEvent): void {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0)
+      return;
+
+    const range = selection.getRangeAt(0);
+    const selectionRects = Array.from(range.getClientRects());
+
+    type CopyWord = {
+      text: string;
+      left: number;
+      right: number;
+      bottom: number;
+      top: number;
+    };
+
+    // Collect the words whose spans intersect the selection (and its rects).
+    const words: CopyWord[] = Array.from(
+      (event.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(
+        ".selectable-word",
+      ),
+    )
+      .filter((element) => {
+        if (!range.intersectsNode(element)) return false;
+        if (selectionRects.length === 0) return true;
+        const rect = element.getBoundingClientRect();
+        return selectionRects.some(
+          (selected) =>
+            rect.left < selected.right &&
+            rect.right > selected.left &&
+            rect.top < selected.bottom &&
+            rect.bottom > selected.top,
+        );
+      })
+      .map((element) => ({
+        text: (element.dataset.text ?? "").trim(),
+        left: Number(element.dataset.left),
+        right: Number(element.dataset.right),
+        bottom: Number(element.dataset.bottom),
+        top: Number(element.dataset.top),
+      }))
+      .filter(
+        (word) =>
+          word.text.length > 0 &&
+          Number.isFinite(word.left) &&
+          Number.isFinite(word.right) &&
+          Number.isFinite(word.bottom) &&
+          Number.isFinite(word.top),
+      );
+
+    if (words.length === 0) return;
+
+    // PDF coordinates are y-up, so a larger `top` is higher on the page.
+    // Sort top-to-bottom first, then group into lines using half the glyph height.
+    words.sort((a, b) => b.top - a.top);
+
+    const lines: CopyWord[][] = [];
+    for (const word of words) {
+      const line = lines[lines.length - 1];
+      if (line) {
+        const ref = line[0];
+        const tolerance =
+          Math.min(ref.top - ref.bottom, word.top - word.bottom) * 0.5;
+        if (Math.abs(ref.top - word.top) <= tolerance) {
+          line.push(word);
+          continue;
+        }
+      }
+      lines.push([word]);
+    }
+
+    const closingPunct = /^[,.;:!?%)\]}»”’]+$/;
+    const openingPunct = /^[(\[{«“‘]+$/;
+
+    const lineTexts = lines.map((line) => {
+      // Reading order within a line is left-to-right.
+      line.sort((a, b) => a.left - b.left);
+
+      let out = "";
+      let prev: CopyWord | undefined;
+      for (const word of line) {
+        if (prev) {
+          const height = Math.max(1, word.top - word.bottom);
+          const gap = word.left - prev.right;
+          // No space before closing punctuation or after opening punctuation
+          // when the glyphs are visually adjacent; otherwise separate words.
+          const attach =
+            (closingPunct.test(word.text) && gap < height * 0.3) ||
+            (openingPunct.test(prev.text) && gap < height * 0.3);
+          if (!attach) out += " ";
+        }
+        out += word.text;
+        prev = word;
+      }
+      return out;
+    });
+
+    const copiedText = lineTexts.join("\n");
+    if (copiedText && event.clipboardData) {
+      event.preventDefault();
+      event.clipboardData.setData("text/plain", copiedText);
+    }
+  }
+
+  function toggleTextSelection(): void {
+    textSelectionMode = !textSelectionMode;
+    if (textSelectionMode) {
+      annotationMode = false;
+      activeAnnotationStroke = null;
+    }
+  }
+
   function prepareContext(
     canvas: HTMLCanvasElement,
     container: HTMLDivElement,
@@ -175,6 +458,7 @@
     canvas.height = Math.round(cssHeight * dpr);
     canvas.style.width = `${cssWidth}px`;
     canvas.style.height = `${cssHeight}px`;
+    canvasSize = { width: cssWidth, height: cssHeight };
 
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return null;
@@ -207,7 +491,7 @@
     ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
 
     const key = getAnnotationKey();
-    const strokes = key ? annotations[key] ?? [] : [];
+    const strokes = key ? (annotations[key] ?? []) : [];
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.strokeStyle = "#e11d48";
@@ -245,9 +529,7 @@
   }
 
   function getAnnotationKey(): string | null {
-    return modalContent
-      ? `${modalContent.file_id}:${modalContent.page}`
-      : null;
+    return modalContent ? `${modalContent.file_id}:${modalContent.page}` : null;
   }
 
   function getCanvasPoint(
@@ -476,10 +758,7 @@
       x: Math.max(0, Math.min(img.width, point.imageX)),
       y: Math.max(0, Math.min(img.height, point.imageY)),
     };
-    if (
-      !last ||
-      Math.hypot(nextPoint.x - last.x, nextPoint.y - last.y) >= 1
-    ) {
+    if (!last || Math.hypot(nextPoint.x - last.x, nextPoint.y - last.y) >= 1) {
       stroke.points = [...stroke.points, nextPoint];
       renderCanvas();
     }
@@ -496,7 +775,15 @@
   }
 
   function handleMouseDown(e: MouseEvent): void {
-    if (annotationMode) return;
+    // Let the browser handle text selection anywhere inside the text layer,
+    // including the gaps between words, instead of starting a pan drag.
+    if (
+      annotationMode ||
+      (e.target as HTMLElement).closest(".selectable-text-layer")
+    ) {
+      return;
+    }
+
     if (viewMode !== "fit") return;
     isDragging = true;
     dragStartX = e.clientX - translateX;
@@ -514,7 +801,7 @@
   }
 
   function handleTouchStart(e: TouchEvent): void {
-    if (annotationMode) return;
+    if (annotationMode || textSelectionMode) return;
     if (viewMode !== "fit") return;
 
     if (e.touches.length === 2) {
@@ -531,7 +818,7 @@
   }
 
   function handleTouchMove(e: TouchEvent): void {
-    if (annotationMode) return;
+    if (annotationMode || textSelectionMode) return;
     if (viewMode !== "fit") return;
 
     if (e.touches.length === 2) {
@@ -1061,16 +1348,28 @@
         <div class="header-right">
           {#if imageLoaded}
             <button
+              class="icon-btn text-selection-toggle"
+              class:icon-btn--active={textSelectionMode}
+              onclick={toggleTextSelection}
+              aria-pressed={textSelectionMode}
+              aria-label={textSelectionMode
+                ? "Stop selecting text"
+                : "Select text on page"}
+              title="Select text on page"
+              type="button"
+            >
+              S
+            </button>
+            <button
               class="icon-btn annotation-toggle"
               class:icon-btn--active={annotationMode}
               onclick={() => {
                 annotationMode = !annotationMode;
+                textSelectionMode = false;
                 activeAnnotationStroke = null;
               }}
               aria-pressed={annotationMode}
-              aria-label={annotationMode
-                ? "Stop annotating"
-                : "Annotate page"}
+              aria-label={annotationMode ? "Stop annotating" : "Annotate page"}
               title={annotationMode
                 ? "Stop annotating"
                 : "Annotate page (hold Shift while drawing for a horizontal line)"}
@@ -1082,7 +1381,8 @@
               <button
                 class="icon-btn annotation-undo"
                 onclick={undoAnnotation}
-                disabled={(annotations[getAnnotationKey() ?? ""] ?? []).length === 0}
+                disabled={(annotations[getAnnotationKey() ?? ""] ?? [])
+                  .length === 0}
                 aria-label="Undo last annotation stroke"
                 title="Undo last stroke"
                 type="button"
@@ -1297,6 +1597,7 @@
           <div
             class="canvas-container"
             class:scroll-mode={viewMode === "scroll"}
+            class:text-selection-mode={textSelectionMode}
             bind:this={containerElement}
             onwheel={handleWheel}
             onpointerdown={handlePointerDown}
@@ -1319,6 +1620,45 @@
               class:fit-mode={viewMode === "fit"}
             ></canvas>
 
+            {#if textSelectionMode && textLayer}
+              <div
+                class="selectable-text-layer"
+                class:annotation-disabled={annotationMode}
+                bind:this={textLayerElement}
+                style={textLayerStyle()}
+                aria-label="Selectable page text"
+                oncopy={handleSelectableTextCopy}
+              >
+                {#each textLayer.words as word, index (index)}
+                  <span
+                    class="selectable-word"
+                    data-text={word.text}
+                    data-left={word.l}
+                    data-right={word.r}
+                    data-bottom={word.b}
+                    data-top={word.t}
+                    style={selectableWordStyle(word)}>{word.text}{" "}</span
+                  >
+                {/each}
+              </div>
+            {/if}
+            {#if textSelectionMode && (textLayerLoading || textLayerError)}
+              <div class="text-layer-status" role="status">
+                {#if textLayerLoading}
+                  Preparing selectable text…
+                {:else}
+                  Could not load selectable text: {textLayerError}
+                  <button
+                    class="plain-text-btn"
+                    onclick={() => (textLayerReload += 1)}
+                    type="button"
+                  >
+                    Retry
+                  </button>
+                {/if}
+              </div>
+            {/if}
+
             {#if !imageLoaded}
               <div class="canvas-loading">
                 <div class="canvas-spinner"></div>
@@ -1326,7 +1666,7 @@
             {/if}
           </div>
           <!-- Reconstructed Plain Text View Overlay -->
-          {#if renderTextSetting.value && pageText && !annotationMode}
+          {#if renderTextSetting.value && pageText && !annotationMode && !textSelectionMode}
             <div class="plain-text-container">
               <div class="plain-text-header">
                 <span class="plain-text-title"
@@ -1902,6 +2242,10 @@
     touch-action: auto;
   }
 
+  .canvas-container.text-selection-mode {
+    touch-action: auto;
+  }
+
   .page-canvas {
     display: block;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7);
@@ -1923,10 +2267,80 @@
     cursor: crosshair;
   }
 
-  .annotation-toggle {
+  .annotation-toggle,
+  .text-selection-toggle {
     min-width: 2rem;
     font-size: 0.9rem;
     font-weight: 700;
+  }
+
+  .selectable-text-layer {
+    position: absolute;
+    z-index: 3;
+    transform-origin: center;
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .selectable-text-layer.annotation-disabled {
+    pointer-events: none;
+  }
+
+  .selectable-word {
+    position: absolute;
+    display: block;
+    width: max-content;
+    overflow: visible;
+    color: transparent;
+    font-family: Arial, sans-serif;
+    font-weight: 400;
+    line-height: 1;
+    white-space: pre;
+    transform-origin: left top;
+    cursor: text;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .selectable-word::selection {
+    color: transparent;
+    background: rgba(59, 130, 246, 0.72);
+  }
+
+  .selectable-text-layer :global(.end-of-content) {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: -1;
+    cursor: default;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  :global(.selectable-text-layer.selecting .end-of-content) {
+    top: 0;
+  }
+
+  .text-layer-status {
+    position: absolute;
+    top: 0.75rem;
+    left: 50%;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    max-width: calc(100% - 1.5rem);
+    padding: 0.5rem 0.75rem;
+    transform: translateX(-50%);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: rgba(17, 24, 39, 0.94);
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   }
 
   .annotation-undo {
