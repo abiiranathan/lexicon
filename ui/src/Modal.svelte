@@ -446,19 +446,24 @@
     const boxWidth = ((word.r - word.l) / textLayer.width) * layout.width;
     const fontSize = Math.max(1, boxHeight);
     textMeasureContext ??= document.createElement("canvas").getContext("2d");
+    let letterSpacing = 0;
     if (textMeasureContext) {
       textMeasureContext.font = `${fontSize}px Arial`;
+      // Stretch (or compress) the text so its advance matches the PDF word
+      // box exactly. Divide by the character count (not count - 1) because
+      // browsers add letter-spacing after every glyph including the last one;
+      // dividing by count - 1 overflows the box and the overlapping
+      // translucent highlights paint darker seams between words.
+      const naturalWidth = textMeasureContext.measureText(word.text).width;
+      const characterCount = [...word.text].length;
+      if (characterCount > 0 && naturalWidth > 0) {
+        letterSpacing = (boxWidth - naturalWidth) / characterCount;
+      }
     }
-    const naturalWidth = textMeasureContext?.measureText(word.text).width ?? 0;
-    const characterCount = [...word.text].length;
-    const letterSpacing =
-      characterCount > 1 && naturalWidth > 0
-        ? (boxWidth - naturalWidth) / (characterCount - 1)
-        : 0;
 
     const verticalOffset =
       ((line.top - word.t) / textLayer.height) * layout.height;
-    return `top:${verticalOffset}px;width:${boxWidth}px;height:${boxHeight}px;font-size:${fontSize}px;line-height:${boxHeight}px;--word-letter-spacing:${letterSpacing}px`;
+    return `top:${verticalOffset}px;width:${boxWidth}px;height:${boxHeight}px;font-size:${fontSize}px;line-height:${boxHeight}px;letter-spacing:${letterSpacing}px;`;
   }
 
   function selectableLineStyle(
@@ -488,15 +493,40 @@
     return `margin-top:${marginTop}px;margin-left:${left}px;height:${height}px;width:${lineWidth}px;`;
   }
 
-  function selectableWordGap(
+  function selectableWordGapWidth(
+    line: (typeof textLayerColumns)[number]["lines"][number],
+    index: number,
+  ): number {
+    if (!textLayer || index === 0) return 0;
+    const layout = textLayerLayout();
+    if (!layout) return 0;
+    const gap = line.words[index].l - line.words[index - 1].r;
+    return Math.max(0, (gap / textLayer.width) * layout.width);
+  }
+
+  // Inter-word gaps are real selectable spacers, not margins: native
+  // ::selection never paints margins, so margin gaps stay unpainted (white)
+  // while words get the custom color. A single space stretched with
+  // letter-spacing to exactly the PDF gap width paints continuously with the
+  // same color as the words.
+  function selectableGapStyle(
     line: (typeof textLayerColumns)[number]["lines"][number],
     index: number,
   ): string {
-    if (!textLayer || index === 0) return "0px";
+    if (!textLayer) return "";
     const layout = textLayerLayout();
-    if (!layout) return "0px";
-    const gap = line.words[index].l - line.words[index - 1].r;
-    return `${Math.max(0, (gap / textLayer.width) * layout.width)}px`;
+    if (!layout) return "";
+    const gapWidth = selectableWordGapWidth(line, index);
+    if (gapWidth <= 0) return "display:none;";
+    const height = ((line.top - line.bottom) / textLayer.height) * layout.height;
+    const fontSize = Math.max(1, height);
+    textMeasureContext ??= document.createElement("canvas").getContext("2d");
+    let letterSpacing = 0;
+    if (textMeasureContext) {
+      textMeasureContext.font = `${fontSize}px Arial`;
+      letterSpacing = gapWidth - textMeasureContext.measureText(" ").width;
+    }
+    return `width:${gapWidth}px;height:${height}px;font-size:${fontSize}px;line-height:${height}px;letter-spacing:${letterSpacing}px;`;
   }
 
   function selectableColumnStyle(
@@ -1821,8 +1851,12 @@
                         class="selectable-line"
                         style={selectableLineStyle(column, line, lineIndex)}
                       >
-                        {#each line.words as word, wordIndex (wordIndex)}
-                          <span
+                        {#each line.words as word, wordIndex (wordIndex)}{#if
+                          wordIndex > 0}<span
+                            class="selectable-gap"
+                            style={selectableGapStyle(line, wordIndex)}
+                            >{" "}</span
+                          >{/if}<span
                             class="selectable-word"
                             data-text={word.text}
                             data-column={columnIndex}
@@ -1830,12 +1864,11 @@
                             data-right={word.r}
                             data-bottom={word.b}
                             data-top={word.t}
-                            style={`margin-left:${selectableWordGap(line, wordIndex)};${selectableWordStyle(word, line)}`}
+                            style={selectableWordStyle(word, line)}
                             ><span class="selectable-word-text"
                               >{word.text}</span
                             ></span
-                          >
-                        {/each}
+                          >{/each}
                       </div>
                     {/each}
                   </div>
@@ -2479,8 +2512,13 @@
     z-index: 3;
     transform-origin: center;
     pointer-events: auto;
-    user-select: text;
-    -webkit-user-select: text;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .selectable-text-layer * {
+    -webkit-user-select: none;
+    user-select: none;
   }
 
   .selectable-text-layer.annotation-disabled {
@@ -2506,6 +2544,7 @@
     max-width: 100%;
     white-space: pre;
     user-select: text;
+    font-size: 0;
     -webkit-user-select: text;
   }
 
@@ -2518,23 +2557,43 @@
   }
 
   .selectable-word-text {
-    position: absolute;
-    top: 0;
-    left: 0;
-    display: block;
     color: transparent;
     font-family: Arial, sans-serif;
     font-weight: 400;
     line-height: inherit;
-    letter-spacing: var(--word-letter-spacing);
+    letter-spacing: inherit;
     white-space: pre;
     user-select: text;
     -webkit-user-select: text;
   }
 
-  .selectable-word-text::selection {
+  /* Selectable inter-word spacer (replaces unpaintable margin gaps). */
+  .selectable-gap {
+    position: relative;
+    display: inline-block;
+    vertical-align: top;
+    overflow: visible;
     color: transparent;
-    background: rgba(59, 130, 246, 0.72);
+    white-space: pre;
+    cursor: text;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  /* Uniform selection highlight: the inter-word gaps belong to the
+     parent line/column/layer, not the word spans. Without this rule those
+     gaps fall back to the UA default (deep skyblue) while words use the
+     custom color, producing alternating blocks. */
+  .selectable-text-layer::selection,
+  .selectable-text-layer ::selection {
+    color: transparent;
+    background: rgba(59, 130, 246, 0.3);
+  }
+
+  .selectable-text-layer::-moz-selection,
+  .selectable-text-layer ::-moz-selection {
+    color: transparent;
+    background: rgba(59, 130, 246, 0.3);
   }
 
   .selectable-text-layer :global(.end-of-content) {
